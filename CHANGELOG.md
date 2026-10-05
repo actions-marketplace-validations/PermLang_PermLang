@@ -2,6 +2,30 @@
 
 All notable changes to PermLang.
 
+## 0.3.2 (2026-10-05)
+
+### Fixed
+
+- **A path above the working directory covered too much.** `fs.read(..)`
+  covered `../../secrets`, and `fs.read(../..)` covered `../../../etc`: paths
+  outside the folder it names. Now a path covers only itself and what's beneath
+  it, as documented. In the other direction, `fs.read(..)` now also covers
+  paths in the working directory, like `data/x`, which are beneath it too.
+- Windows drive paths (`C:\data`) are treated as absolute, so `fs.read(.)` no
+  longer covers them, and `..` can't climb above the drive.
+
+### Added
+
+- Property-based tests (`test/properties.test.ts`, using fast-check) for the
+  rules that must hold for every input: escaping text into GitHub annotations,
+  SARIF output, parsing `@perm`, path and host matching, reading and diffing
+  the lock, and recording workflows and `package.json` scripts. They found the
+  path bug above.
+- Each GitHub release has the npm package attached, with a signed SLSA build
+  provenance attestation for it, so anyone can check a package was built by
+  this repository's release workflow: see
+  [SECURITY.md](SECURITY.md#verifying-a-release).
+
 ## 0.3.1 (2026-10-05)
 
 ### Fixed

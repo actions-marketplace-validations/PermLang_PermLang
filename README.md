@@ -5,10 +5,9 @@
 **Know what your code can touch, before it ships.**
 
 [![npm](https://img.shields.io/npm/v/permlang)](https://www.npmjs.com/package/permlang)
-[![CI](https://github.com/PermLang/permlang/actions/workflows/ci.yml/badge.svg)](https://github.com/PermLang/permlang/actions/workflows/ci.yml)
+[![CI](https://github.com/PermLang/PermLang/actions/workflows/ci.yml/badge.svg)](https://github.com/PermLang/PermLang/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/PermLang/PermLang/graph/badge.svg)](https://codecov.io/gh/PermLang/PermLang)
 [![GitHub Marketplace](https://img.shields.io/badge/Marketplace-PermLang-2B3BFF?logo=github)](https://github.com/marketplace/actions/permlang)
-[![Node](https://img.shields.io/node/v/permlang)](package.json)
-[![Types: TypeScript](https://img.shields.io/npm/types/permlang)](https://www.npmjs.com/package/permlang)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/PermLang/PermLang/badge)](https://scorecard.dev/viewer/?uri=github.com/PermLang/PermLang)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15173/badge)](https://www.bestpractices.dev/projects/15173)
@@ -120,7 +119,7 @@ walks through the rest in about ten minutes.
 
 > [!NOTE]
 > **PermLang is new (v0.x).** Feedback, false positives, and missed access are
-> all welcome as [issues](https://github.com/PermLang/permlang/issues). See the
+> all welcome as [issues](https://github.com/PermLang/PermLang/issues). See the
 > [changelog](CHANGELOG.md) for what each release changes.
 
 ## What it can't see (yet)
@@ -135,6 +134,32 @@ PermLang is upfront about its blind spots, and reports them instead of hiding th
   exception is listed.
 - A few advanced tricks are documented, with tests, in the
   [reference](docs/reference.md#known-limits).
+
+## Common questions
+
+**Does it work with code from AI coding assistants?**
+Yes. It checks the code, whoever wrote it: GitHub Copilot, Cursor, another AI
+assistant, or a person. It's built for the pull request nobody reads line by line.
+
+**How do I see what my MCP server's tools can do?**
+Run `npx permlang check src`. The report lists every tool registered with MCP,
+the Vercel AI SDK, OpenAI Agents, or LangChain, what each can reach, and warns
+when a model could use one to run commands, write data, or send to any address.
+[More on AI tools](docs/reference.md#tools-given-to-ai-models).
+
+**How is it different from CodeQL or Semgrep?**
+Those scanners look for known-bad patterns, such as SQL injection. PermLang
+tracks what your code can reach and flags anything new, even when it looks
+perfectly normal, like a call to an unfamiliar server. They work well together:
+PermLang's own repository runs CodeQL too.
+
+**Does it run my code or send it anywhere?**
+No. It reads your source with the TypeScript compiler and never runs it. Your
+code stays on your machine or CI runner: the command-line tool makes no network
+calls, and the GitHub Action only posts its results to the pull request.
+
+**Is it free?**
+Yes. PermLang is open source under the Apache 2.0 license.
 
 ## Learn more
 

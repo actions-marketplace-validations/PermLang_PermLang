@@ -1,28 +1,37 @@
 {
   "name": "permlang",
-  "version": "0.3.1",
-  "description": "The permission diff for AI-written TypeScript. Declare what each function can touch; the build fails when code exceeds it.",
+  "version": "0.3.2",
+  "description": "Build-time permission checker for TypeScript and AI agents. Fails the pull request when code starts reaching a new server, file, secret, database table, risky MCP tool, or CI permission.",
   "keywords": [
     "permissions",
     "capabilities",
+    "least-privilege",
     "static-analysis",
+    "sast",
+    "security-scanner",
     "typescript",
     "security",
+    "devsecops",
     "code-review",
     "ai-generated-code",
     "ai-agents",
+    "ai-security",
+    "llm-security",
+    "prompt-injection",
     "mcp",
+    "model-context-protocol",
+    "github-action",
     "github-actions",
     "supply-chain-security",
     "lint"
   ],
-  "homepage": "https://github.com/PermLang/permlang#readme",
+  "homepage": "https://github.com/PermLang/PermLang#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/PermLang/permlang.git"
+    "url": "git+https://github.com/PermLang/PermLang.git"
   },
   "bugs": {
-    "url": "https://github.com/PermLang/permlang/issues"
+    "url": "https://github.com/PermLang/PermLang/issues"
   },
   "license": "Apache-2.0",
   "type": "module",
@@ -44,6 +53,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "permlang": "tsx src/cli.ts",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
@@ -53,6 +63,8 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^5.0.3",
+    "fast-check": "^4.10.2",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "vitest": "^5.0.3"

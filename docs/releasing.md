@@ -12,9 +12,16 @@ The npm package is `permlang`, owned by the npm user `parkweb`, with the
    (for example `v0.2.3`), on `main`.
 
 The [release workflow](../.github/workflows/release.yml) checks that the tag
-matches `package.json`, runs the tests, publishes to npm with provenance, and
-moves the `v0` tag. A new version can take a few minutes to download from npm
-after the workflow finishes.
+matches `package.json`, runs the tests, and packs the package. It signs a build
+provenance attestation for that tarball, publishes the same tarball to npm with
+provenance, attaches it and the attestation to the GitHub release, and moves
+the `v0` tag. A new version can take a few minutes to download from npm after
+the workflow finishes.
+
+The attached files are what OpenSSF Scorecard's Signed-Releases check looks
+for, so don't remove them from a release.
+[SECURITY.md](../SECURITY.md#verifying-a-release) tells users how to verify
+them.
 
 ## Choosing the version
 

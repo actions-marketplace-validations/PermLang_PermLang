@@ -4,7 +4,9 @@
     ".github/workflows/ci.yml#<ci.yml>": [
       "ci.action(actions/checkout)",
       "ci.action(actions/setup-node)",
+      "ci.action(codecov/codecov-action)",
       "ci.permission(contents: read)",
+      "ci.permission(id-token: write)",
       "ci.trigger(pull_request)",
       "ci.trigger(push)"
     ],
@@ -18,8 +20,10 @@
       "ci.trigger(push)"
     ],
     ".github/workflows/release.yml#<release.yml>": [
+      "ci.action(actions/attest)",
       "ci.action(actions/checkout)",
       "ci.action(actions/setup-node)",
+      "ci.permission(attestations: write)",
       "ci.permission(contents: write)",
       "ci.permission(id-token: write)",
       "ci.trigger(release)"
@@ -45,6 +49,7 @@
       "npm.script(permlang: tsx src/cli.ts)",
       "npm.script(prepublishOnly: npm run typecheck && npm test && npm run build)",
       "npm.script(test: vitest run)",
+      "npm.script(test:coverage: vitest run --coverage)",
       "npm.script(test:watch: vitest)",
       "npm.script(typecheck: tsc --noEmit)"
     ],

@@ -55,6 +55,20 @@ describe("covers", () => {
     expect(covers([cap("fs.read", "/var/app")], cap("fs.read", "var/app/x"))).toBe(false);
   });
 
+  it("lets a folder above the working directory cover only what's beneath it", () => {
+    expect(covers([cap("fs.read", "..")], cap("fs.read", "../shared/x"))).toBe(true);
+    expect(covers([cap("fs.read", "..")], cap("fs.read", "data/x"))).toBe(true);
+    expect(covers([cap("fs.read", "..")], cap("fs.read", "../../secrets"))).toBe(false);
+    expect(covers([cap("fs.read", "../..")], cap("fs.read", "../../../etc/passwd"))).toBe(false);
+    expect(covers([cap("fs.read", ".")], cap("fs.read", "../x"))).toBe(false);
+  });
+
+  it("treats Windows drive paths as absolute", () => {
+    expect(covers([cap("fs.read", ".")], cap("fs.read", "C:\\Windows\\system.ini"))).toBe(false);
+    expect(covers([cap("fs.read", "C:\\data")], cap("fs.read", "C:/data/x.json"))).toBe(true);
+    expect(covers([cap("fs.read", "C:/data")], cap("fs.read", "C:/data/../../x"))).toBe(false);
+  });
+
   it("does not let one capability stand in for another", () => {
     expect(covers([cap("fs.read", "./data")], cap("fs.write", "./data/x"))).toBe(false);
     expect(covers([cap("db.read", "leads")], cap("db.write", "leads"))).toBe(false);

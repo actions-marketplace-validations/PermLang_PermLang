@@ -38,3 +38,26 @@ jobs:
           # The fail fixtures must make the CLI exit 1.
           set +e; node dist/cli.js check fixtures/m1/fail --no-lock > /dev/null; code=$?; set -e
           test "$code" -eq 1
+
+  # Measures what the tests cover and uploads it to Codecov, for the README badge. A job of
+  # its own, so only it can get the OIDC token Codecov signs in with (no stored secret).
+  coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # sign in to Codecov
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:coverage
+      # Pull requests from forks get no OIDC token, so a failed upload doesn't fail the job.
+      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          use_oidc: true
+          files: coverage/lcov.info
+          disable_search: true
+          fail_ci_if_error: false

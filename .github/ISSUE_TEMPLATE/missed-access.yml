@@ -5,9 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        **If this lets code get past PermLang on purpose, please report it privately instead**, through the [Security tab](https://github.com/PermLang/permlang/security) (see [SECURITY.md](https://github.com/PermLang/permlang/blob/main/SECURITY.md)).
+        **If this lets code get past PermLang on purpose, please report it privately instead**, through the [Security tab](https://github.com/PermLang/PermLang/security) (see [SECURITY.md](https://github.com/PermLang/PermLang/blob/main/SECURITY.md)).
 
-        Check the [known limits](https://github.com/PermLang/permlang/blob/main/docs/reference.md#known-limits) first. Ideas for closing one of those are welcome here.
+        Check the [known limits](https://github.com/PermLang/PermLang/blob/main/docs/reference.md#known-limits) first. Ideas for closing one of those are welcome here.
   - type: textarea
     id: code
     attributes:

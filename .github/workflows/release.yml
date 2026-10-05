@@ -16,8 +16,9 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # move the v0 tag the Action is used by
-      id-token: write # npm trusted publishing and provenance
+      contents: write # move the v0 tag the Action is used by, and attach the package to the release
+      id-token: write # npm trusted publishing and provenance, and signing the attestation
+      attestations: write # store the attestation, so `gh attestation verify` finds it
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -39,13 +40,39 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # The tarball is packed once, then attested, published, and attached to the release, so
+      # all three are the same bytes.
+      - name: Pack
+        id: pack
+        shell: bash
+        run: echo "file=$(npm pack | tail -n 1)" >> "$GITHUB_OUTPUT"
+      - name: Attest the package
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.pack.outputs.file }}
       - name: Publish
         shell: bash
+        env:
+          FILE: ${{ steps.pack.outputs.file }}
         run: |
           version=$(node -p "require('./package.json').version")
           # The first version is published by hand (docs/releasing.md); don't fail on it.
           if npm view "permlang@$version" version > /dev/null 2>&1; then echo "permlang@$version is already on npm."; exit 0; fi
-          npm publish --access public
+          npm publish "./$FILE" --access public
+      - name: Attach the package and its provenance to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          FILE: ${{ steps.pack.outputs.file }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          # The Sigstore bundle, which `gh attestation verify --bundle` and cosign read, and the
+          # signed SLSA provenance inside it (a DSSE envelope), as in-toto JSON Lines.
+          cp "$BUNDLE" "$FILE.sigstore.json"
+          node -e 'const [b] = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n"); console.log(JSON.stringify(JSON.parse(b).dsseEnvelope))' "$BUNDLE" > "$FILE.intoto.jsonl"
+          gh release upload "$TAG" "$FILE" "$FILE.sigstore.json" "$FILE.intoto.jsonl" --clobber
       - name: Point the v0 tag at this release
         shell: bash
         env:

@@ -23,6 +23,7 @@ You need Node 20 or later.
 git clone https://github.com/PermLang/PermLang && cd PermLang
 npm install
 npm test                                          # all tests
+npm run test:coverage                             # ...and what they cover
 npm run typecheck                                 # TypeScript, strict
 npm run permlang -- check src                     # PermLang checks its own code
 ```
@@ -44,6 +45,12 @@ organized.
    (`test/adversarial.test.ts`): `caught` for what must be reported, `silent`
    for harmless code that mustn't be, and `knownMisses` for documented gaps.
    Each known miss's test fails once it's fixed.
+
+   Rules that must hold for every input, such as escaping, path matching, and
+   reading the lock, are property tests in `test/properties.test.ts`:
+   [fast-check](https://fast-check.dev) generates hundreds of inputs and
+   shrinks a failure to the smallest one. When one fails, it prints a seed and
+   the input, which make good example tests.
 2. **Make the change.** Keep modules small, and match the style around you.
    TypeScript runs in strict mode, and warnings must be fixed, not suppressed.
 3. **Check that the test fails without your change.** For a fix, the new test

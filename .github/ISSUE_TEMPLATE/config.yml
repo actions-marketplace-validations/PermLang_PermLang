@@ -1,8 +1,8 @@
 blank_issues_enabled: true
 contact_links:
   - name: Report a security vulnerability
-    url: https://github.com/PermLang/permlang/security/advisories/new
+    url: https://github.com/PermLang/PermLang/security/advisories/new
     about: Ways to get past PermLang, reported privately.
   - name: Questions and ideas
-    url: https://github.com/PermLang/permlang/discussions
+    url: https://github.com/PermLang/PermLang/discussions
     about: Ask how to use PermLang, or suggest a feature.

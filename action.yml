@@ -1,5 +1,5 @@
 name: PermLang
-description: Check what each function can touch, and comment the permission diff on pull requests.
+description: Fail pull requests that give TypeScript code new access to servers, files, secrets, databases, AI tools, or CI permissions.
 author: PermLang
 branding:
   icon: shield
