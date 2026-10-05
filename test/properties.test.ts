@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isMap, parseDocument, stringify } from "yaml";
 import { BUILTIN_CAPABILITIES, BUILTIN_VOCABULARY, covers, formatCapability, parsePermList, type Capability } from "../src/capability.js";
 import type { Diagnostic, Report } from "../src/check.js";
+import { sqlTables } from "../src/detect/sql-tables.js";
 import { parseFlows } from "../src/flows.js";
 import { diffLocks, LockError, parseLock, serializeLock, type LockFile } from "../src/lock.js";
 import { projectFiles } from "../src/project-files.js";
@@ -170,6 +171,36 @@ describe("capabilities", () => {
         expect(covers([{ name, arg: declared }], { name, arg: used })).toBe(inside(declared, used));
       }),
       { numRuns: 1000 },
+    );
+  });
+});
+
+// --- SQL ------------------------------------------------------------------------------
+
+describe("SQL table reader", () => {
+  // Quoted, so no generated name is a keyword.
+  const table = fc.stringMatching(/^[a-z_][a-z0-9_]{0,8}$/);
+
+  it("never throws on any text: it names the tables, or says it can't", () => {
+    const sqlish = fc.string({
+      unit: fc.constantFrom("SELECT ", "FROM ", "a", "b.c", '"q"', "`t`", "[x]", "(", ")", ",", ";", "'s'", "--", "/*", "*/", "$1", "?", ":p", "JOIN ", "ON ", "WITH ", "INSERT INTO ", "DELETE FROM ", "UPDATE ", " SET ", "\n"),
+    });
+    fc.assert(
+      fc.property(fc.oneof(hostile, sqlish), (sql) => {
+        const tables = sqlTables(sql);
+        if (tables) for (const t of [...tables.read, ...tables.write]) expect(typeof t).toBe("string");
+      }),
+      { numRuns: 500 },
+    );
+  });
+
+  it("names exactly the tables a simple query reads and writes", () => {
+    fc.assert(
+      fc.property(table, table, table, (a, b, c) => {
+        expect(sqlTables(`SELECT * FROM "${a}" JOIN "${b}" ON 1 = 1`)).toEqual({ read: [...new Set([a, b])], write: [] });
+        expect(sqlTables(`INSERT INTO "${c}" (id) SELECT id FROM "${a}"`)).toEqual({ read: [a], write: [c] });
+        expect(sqlTables(`DELETE FROM "${c}" WHERE id IN (SELECT id FROM "${b}")`)).toEqual({ read: [b], write: [c] });
+      }),
     );
   });
 });

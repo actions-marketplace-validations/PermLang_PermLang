@@ -3,6 +3,7 @@
 declare module "pg" {
   export class Pool {
     query(text: string, values?: unknown[]): Promise<unknown>;
+    query(config: { text: string; values?: unknown[] }): Promise<unknown>;
     connect(): Promise<PoolClient>;
     end(): Promise<void>;
   }
@@ -16,6 +17,7 @@ declare module "pg" {
 declare module "mysql2/promise" {
   export interface Pool {
     query(sql: string, values?: unknown[]): Promise<unknown>;
+    query(options: { sql: string; values?: unknown[] }): Promise<unknown>;
     execute(sql: string, values?: unknown[]): Promise<unknown>;
   }
   export function createPool(uri: string): Pool;

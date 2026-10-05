@@ -572,7 +572,8 @@ src/check.ts        comparing declared vs. actual per unit
 src/lock.ts         permlang.lock.json: build, read, compare
 src/diff.ts         the permission diff, as text or a pull-request comment
 src/report.ts       text, JSON, GitHub annotation, and SARIF output
-src/cli.ts          the permlang command
+src/main.ts         the permlang command: its subcommands and options
+src/cli.ts          the executable that runs it
 src/index.ts        the library API
 src/spec/           .perm specs: parsing and checking
 ```

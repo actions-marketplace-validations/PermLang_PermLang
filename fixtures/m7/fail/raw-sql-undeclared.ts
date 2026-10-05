@@ -18,3 +18,10 @@ export async function cleanup(table: string, id: string) {
   await pool.query(`SELECT * FROM ${table}`); // expect: error PERM001 db.read expect: error PERM001 db.write
   await sql.unsafe(`DELETE FROM ${table}`); // expect: error PERM001 db.read expect: error PERM001 db.write
 }
+
+// The same queries as config objects: pg's { text }, mysql2's { sql }.
+/** @perm db.read(leads) */
+export async function configs() {
+  await pool.query({ text: "DELETE FROM audit WHERE id = $1", values: [1] }); // expect: error PERM001 db.write(audit)
+  await mysql.query({ sql: "SELECT * FROM payroll" }); // expect: error PERM001 db.read(payroll)
+}

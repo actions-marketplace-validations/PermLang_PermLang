@@ -1,26 +1,16 @@
-// `permlang init`: the day-one setup for an existing project. Runs the real CLI
-// in a temporary directory.
+// `permlang init`: the day-one setup for an existing project. Runs the CLI in a
+// temporary directory.
 
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-
-const repo = fileURLToPath(new URL("..", import.meta.url));
-const tsx = path.join(repo, "node_modules", "tsx", "dist", "cli.mjs");
-const cli = path.join(repo, "src", "cli.ts");
+import { runCli } from "./run-cli.js";
 
 let dir: string;
 
 function permlang(...args: string[]): { code: number; out: string } {
-  try {
-    return { code: 0, out: execFileSync(process.execPath, [tsx, cli, ...args], { cwd: dir, encoding: "utf8" }) };
-  } catch (e) {
-    const err = e as { status: number; stdout: string; stderr: string };
-    return { code: err.status, out: err.stdout + err.stderr };
-  }
+  return runCli(args, { cwd: dir });
 }
 
 beforeEach(() => {
@@ -59,6 +49,22 @@ describe("permlang init", () => {
     expect(workflow).toContain("uses: PermLang/permlang@v0");
     expect(workflow).toContain("args: src");
     expect(workflow).toContain("pull-requests: write");
+  });
+
+  it("names the TypeScript project in the workflow when given one, and keeps a workflow that exists", () => {
+    writeFileSync(path.join(dir, "tsconfig.json"), JSON.stringify({ include: ["src"] }));
+    permlang("init", "--project", "tsconfig.json", "--workflow");
+    const file = path.join(dir, ".github", "workflows", "permlang.yml");
+    expect(readFileSync(file, "utf8")).toContain("args: --project tsconfig.json");
+    writeFileSync(file, "# edited\n");
+    expect(permlang("init", "--project", "tsconfig.json", "--workflow").out).toContain("Kept .github/workflows/permlang.yml.");
+    expect(readFileSync(file, "utf8")).toBe("# edited\n");
+  });
+
+  it("rejects an unknown strictness", () => {
+    const { code, out } = permlang("init", "src", "--strictness", "strict");
+    expect(code).toBe(2);
+    expect(out).toMatch(/^Strictness must be one of/);
   });
 
   // Without the dependencies' types, CI can't see file, process, or environment access (found

@@ -1,5 +1,5 @@
-// CLI edge cases from the pre-release review. Runs the real CLI in a temporary
-// git repository whose code isn't in ./src.
+// CLI edge cases from the pre-release review. Runs the CLI in a temporary git
+// repository whose code isn't in ./src.
 
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -7,23 +7,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { runCli } from "./run-cli.js";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
-const tsx = path.join(repo, "node_modules", "tsx", "dist", "cli.mjs");
-const cli = path.join(repo, "src", "cli.ts");
 
 let dir: string;
 
 function permlang(...args: string[]): { code: number; out: string } {
   // The temporary repository is the workspace, as it would be in its own GitHub Actions run.
   // (When these tests run in Actions, GITHUB_WORKSPACE is PermLang's own checkout.)
-  const env = { ...process.env, GITHUB_WORKSPACE: dir };
-  try {
-    return { code: 0, out: execFileSync(process.execPath, [tsx, cli, ...args], { cwd: dir, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }) };
-  } catch (e) {
-    const err = e as { status: number; stdout: string; stderr: string };
-    return { code: err.status, out: err.stdout + err.stderr };
-  }
+  return runCli(args, { cwd: dir, env: { GITHUB_WORKSPACE: dir } });
 }
 
 const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
@@ -97,12 +90,164 @@ describe("permlang diff", () => {
   });
 });
 
+describe("permlang diff --head", () => {
+  it("compares two commits' locks", () => {
+    permlang("init", "my lib");
+    git("add", "-A");
+    git("commit", "-q", "-m", "base");
+    const { code, out } = permlang("diff", "HEAD", "my lib", "--head", "HEAD");
+    expect(code).toBe(0);
+    expect(out).toContain("No permission changes");
+  });
+
+  it("says so when the lock doesn't exist at that commit", () => {
+    git("commit", "-q", "--allow-empty", "-m", "empty");
+    permlang("init", "my lib");
+    const { code, out } = permlang("diff", "HEAD", "my lib", "--head", "HEAD");
+    expect(code).toBe(2);
+    expect(out).toContain("permlang.lock.json doesn't exist at HEAD.");
+  });
+});
+
+/** Writes a file under the temporary repository, creating its folder. */
+function write(file: string, text: string) {
+  mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+  writeFileSync(path.join(dir, file), text);
+}
+
+describe("permlang check output", () => {
+  it("prints the report as JSON, with paths relative to the folder it runs in", () => {
+    const { code, out } = permlang("check", "my lib", "--no-lock", "--json");
+    expect(code).toBe(1);
+    const report = JSON.parse(out) as { version: number; diagnostics: { file: string; code: string }[]; functions: { file: string; actual: string[] }[] };
+    expect(report.version).toBe(1);
+    expect(report.diagnostics).toEqual([expect.objectContaining({ file: "my lib/app.ts", code: "PERM003" })]);
+    expect(report.functions).toEqual([expect.objectContaining({ file: "my lib/app.ts", actual: ["net(api.example.com)"] })]);
+  });
+
+  it("says when there's nothing to report", () => {
+    write("pure/math.ts", "export function add(a: number, b: number) { return a + b; }\n");
+    expect(permlang("check", "pure", "--no-lock")).toEqual({ code: 0, out: "No permission violations in 1 file.\n" });
+  });
+
+  it("lists imports with no types, packages with no adapter, and @perm-unsafe overrides", () => {
+    // Eleven typed packages PermLang has no adapter for; the text report shows ten.
+    const names = Array.from({ length: 11 }, (_, i) => `pkg-${String.fromCharCode(97 + i)}`);
+    for (const name of names) {
+      write(`node_modules/${name}/package.json`, JSON.stringify({ name, version: "1.0.0", types: "index.d.ts" }));
+      write(`node_modules/${name}/index.d.ts`, "export declare function go(): void;\n");
+    }
+    write(
+      "mixed/app.ts",
+      [
+        `import { missing } from "not-installed";`,
+        ...names.map((n, i) => `import { go as go${i} } from "${n}";`),
+        `/** @perm-unsafe reason:"wraps a legacy SDK" */`,
+        `export function legacy() { missing(); ${names.map((_, i) => `go${i}();`).join(" ")} }`,
+        "",
+      ].join("\n"),
+    );
+    const { out } = permlang("check", "mixed", "--no-lock");
+    expect(out).toContain("1 import with no types, unchecked: not-installed.");
+    expect(out).toMatch(/11 packages with no adapter, trusted \(calls\): pkg-a \(1\), .*, and 1 more \(see --json\)\./);
+    expect(out).toContain("1 @perm-unsafe override (checks suppressed):\n  mixed/app.ts:");
+    expect(out).toContain("legacy: wraps a legacy SDK");
+  });
+
+  it("loads adapters a config file lists, relative to the config file", () => {
+    write("node_modules/acme-sms/package.json", JSON.stringify({ name: "acme-sms", version: "1.0.0", types: "index.d.ts" }));
+    write("node_modules/acme-sms/index.d.ts", "export declare function send(to: string, text: string): void;\n");
+    write("conf/acme-sms.json", JSON.stringify({ permlang: 1, package: "acme-sms", defines: ["sms.send"], default: [], functions: { send: ["sms.send"] } }));
+    write("conf/permlang.config.json", JSON.stringify({ adapters: ["./acme-sms.json"] }));
+    write("sms/alert.ts", `import { send } from "acme-sms";\nexport function alert() { send("+15550100", "hi"); }\n`);
+    const { code, out } = permlang("check", "sms", "--no-lock", "--config", "conf/permlang.config.json");
+    expect(code).toBe(1);
+    expect(out).toContain("sms.send");
+  });
+});
+
+describe("permlang spec", () => {
+  const spec = (perms: string, implementsLine = "  implements: ping.ts#ping\n") =>
+    `perm ping()\n${implementsLine}\n  must:\n    only call the example API\n\n  perms:\n    ${perms}\n`;
+  beforeEach(() => write("svc/ping.ts", `export async function ping() {\n  return fetch("https://api.example.com/");\n}\n`));
+
+  it("passes a spec whose implementation stays within its perms", () => {
+    write("svc/ping.perm", spec("net(api.example.com)"));
+    const { code, out } = permlang("spec", "svc");
+    expect(code).toBe(0);
+    expect(out).toContain("perm ping  ping.ts#ping\n  perms     no access beyond the declared scope\n  must      1 rule, not verified yet (phase 2)\n  examples  0 examples, not run yet (phase 2)");
+    expect(out).toContain("1 spec, 0 failing.");
+  });
+
+  it("fails one whose implementation reaches beyond them", () => {
+    write("svc/ping.perm", spec("env(HOME)"));
+    const { code, out } = permlang("spec", "svc");
+    expect(code).toBe(1);
+    expect(out).toContain("FAIL: reaches net(api.example.com)");
+    expect(out).toMatch(/svc\/ping\.perm:\d+ error SPEC003/);
+  });
+
+  it("reports a spec with no implementation, and one that can't be parsed", () => {
+    write("svc/ping.perm", spec("net(api.example.com)", ""));
+    write("svc/bad.perm", "perm broken(\n");
+    const { code, out } = permlang("spec", "svc");
+    expect(code).toBe(1);
+    expect(out).toMatch(/svc\/bad\.perm:1 error SPEC001/);
+    expect(out).toContain("implementation not found");
+  });
+
+  it("prints JSON, checks only the specs it's given, and says when there are none", () => {
+    write("svc/ping.perm", spec("net(api.example.com)"));
+    const json = JSON.parse(permlang("spec", "svc", "--json").out) as { errors: unknown[]; results: { spec: string; status: string }[] };
+    expect(json).toEqual({ errors: [], results: [expect.objectContaining({ spec: "ping", status: "perms ok" })] });
+    expect(permlang("spec", "svc", "--spec", "svc/nope.perm")).toEqual({ code: 2, out: "Not found: svc/nope.perm\n" });
+    rmSync(path.join(dir, "svc", "ping.perm"));
+    expect(permlang("spec", "svc")).toEqual({ code: 0, out: "No .perm specs found.\n" });
+  });
+});
+
+describe("usage errors", () => {
+  it.each([
+    [[], /^Usage:/],
+    [["frob"], /^Unknown command "frob"/],
+    [["check", "--frob"], /^Unknown option "--frob"/],
+    [["check", "--lock"], /^--lock needs a value\./],
+    [["check", "my lib", "--strictness", "strict"], /^Strictness must be one of: sketch, development, production\./],
+    [["check", "my lib", "--unmapped", "ignore"], /^"unmapped" must be one of: warn, error, trust\./],
+    [["diff", "--format", "yaml"], /^--format must be text, markdown, or json\./],
+    // A repository with no commits has no HEAD to compare with.
+    [["diff"], /^Can't read permlang\.lock\.json at HEAD: /],
+  ])("exits 2 on %j", (args, message) => {
+    const { code, out } = permlang(...args);
+    expect(code).toBe(2);
+    expect(out).toMatch(message);
+  });
+
+  it("exits 2 on a diff with no lock file", () => {
+    git("commit", "-q", "--allow-empty", "-m", "empty");
+    expect(permlang("diff")).toEqual({ code: 2, out: "No permlang.lock.json. Run `permlang lock` first.\n" });
+  });
+});
+
 describe("configuration errors", () => {
   it("exits 2 on a config file that isn't an object", () => {
     writeFileSync(path.join(dir, "permlang.config.json"), "null\n");
     const { code, out } = permlang("check", "my lib");
     expect(code).toBe(2);
     expect(out).toMatch(/permlang\.config\.json.*object/);
+  });
+
+  it.each([
+    ["{ not json", /^Can't read permlang\.config\.json: /],
+    [`{ "adapters": "./a.json" }`, /^permlang\.config\.json: "adapters" must be a list of manifest paths\./],
+    [`{ "strictness": 3 }`, /^permlang\.config\.json: "strictness" must be one of: sketch, development, production\./],
+    [`{ "strictness": "strict" }`, /^Strictness must be one of/],
+    [`{ "tools": "ignore" }`, /^"tools" must be one of: warn, error, trust\./],
+  ])("exits 2 on the config %s", (config, message) => {
+    writeFileSync(path.join(dir, "permlang.config.json"), config);
+    const { code, out } = permlang("check", "my lib");
+    expect(code).toBe(2);
+    expect(out).toMatch(message);
   });
 });
 
@@ -202,14 +347,26 @@ describe("permlang check --github-annotations", () => {
   });
 
   it("names files from the repository root (GITHUB_WORKSPACE), not the folder it runs in", () => {
-    const run = (env: NodeJS.ProcessEnv) => {
+    const { out } = runCli(["check", ".", "--no-lock", "--github-annotations"], { cwd: path.join(dir, "my lib"), env: { GITHUB_WORKSPACE: dir } });
+    expect(out).toMatch(/^::error file=my lib\/app\.ts,line=2/m);
+  });
+});
+
+describe("the permlang executable", () => {
+  // Every other test calls the command in-process; this runs the file npm installs as `permlang`.
+  it("runs the command and exits with its code", () => {
+    const run = (...args: string[]) => {
       try {
-        return execFileSync(process.execPath, [tsx, cli, "check", ".", "--no-lock", "--github-annotations"], { cwd: path.join(dir, "my lib"), env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        return { code: 0, out: execFileSync(process.execPath, [path.join(repo, "node_modules", "tsx", "dist", "cli.mjs"), path.join(repo, "src", "cli.ts"), ...args], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }) };
       } catch (e) {
-        return (e as { stdout: string }).stdout;
+        const err = e as { status: number; stdout: string };
+        return { code: err.status, out: err.stdout };
       }
     };
-    expect(run({ ...process.env, GITHUB_WORKSPACE: dir })).toMatch(/^::error file=my lib\/app\.ts,line=2/m);
+    expect(run("--version").out.trim()).toBe(JSON.parse(readFileSync(path.join(repo, "package.json"), "utf8")).version);
+    const failing = run("check", "my lib", "--no-lock");
+    expect(failing.code).toBe(1);
+    expect(failing.out).toContain("my lib/app.ts:2:10 error PERM003");
   });
 });
 

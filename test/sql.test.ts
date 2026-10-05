@@ -42,6 +42,13 @@ describe("sqlTables: understood statements", () => {
     ["UPDATE IGNORE secrets SET v = 1", { read: [], write: ["secrets"] }],
     ["DELETE FROM sessions WHERE expires < now()", { read: [], write: ["sessions"] }],
     ["DELETE IGNORE FROM secrets WHERE id = 1", { read: [], write: ["secrets"] }],
+    ["SELECT * FROM [users] JOIN [dbo].[orders] ON 1 = 1", { read: ["users", "dbo.orders"], write: [] }],
+    ["SELECT * FROM a WHERE id = :id AND b = @b AND c = ?;", { read: ["a"], write: [] }],
+    ["SELECT * FROM ONLY parent WHERE b IS NOT DISTINCT FROM c", { read: ["parent"], write: [] }],
+    ["SELECT * FROM (SELECT id FROM b) AS s (x)", { read: ["b"], write: [] }],
+    ["INSERT INTO a AS t (id) VALUES (1)", { read: [], write: ["a"] }],
+    ["DELETE FROM ONLY a WHERE x = 1", { read: [], write: ["a"] }],
+    ["-- nothing but a comment", { read: [], write: [] }],
   ])("%s", (sql, expected) => {
     expect(sqlTables(sql)).toEqual(expected);
   });
@@ -92,6 +99,16 @@ describe("sqlTables: anything else is unknown", () => {
     "SELECT * FROM a /*!, secrets */",
     "SELECT * FROM ümlaut",
     "SELECT * FROM a WHERE x = 'unterminated",
+    "SELECT * FROM [secrets",
+    "SELECT * FROM a /* outer /* inner */ secrets */",
+    "SELECT * FROM a /* never closed",
+    // Shapes the grammar doesn't cover.
+    "SELECT * FROM a AS",
+    "SELECT * FROM (VALUES (1)) v",
+    "SELECT * FROM a LEFT secrets",
+    "SELECT * FROM a JOIN secrets USING id",
+    "SELECT * FROM a) JOIN (secrets",
+    "SELECT * FROM (a",
     // A placeholder where a table name goes (postgres.js `${sql(t)}`).
     "SELECT * FROM $1",
     "DELETE FROM ?",

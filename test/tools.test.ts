@@ -113,6 +113,9 @@ export const shellTool = new DynamicStructuredTool({ name: "shell", description:
   notAnAiPackage: `import { tool } from "task-runner";
 import { execSync } from "node:child_process";
 export const job = tool({ execute: () => execSync("make") });`,
+  // No name anywhere: not in the call, not in its options, not where it's stored.
+  unnamed: `import { tool } from "ai";
+export const toolList = [tool({ description: "Say hello", inputSchema: {}, execute: async () => "hello" })];`,
   notATool: `import { generateText } from "ai";
 export async function summarize(text: string) {
   return generateText({ prompt: text });
@@ -145,6 +148,7 @@ describe("tools given to AI models", () => {
       "@openai/agents browse",
       "@openai/agents cleanup",
       "ai deleteUser",
+      "ai tool",
       "ai weather",
     ]);
   });
@@ -194,7 +198,7 @@ describe("tools given to AI models", () => {
     expect(run({ strictness: "development", tools: "error" }).diagnostics.filter((d) => d.code === "PERM008").every((d) => d.severity === "error")).toBe(true);
     expect(run({ tools: "trust" }).diagnostics.filter((d) => d.code === "PERM008")).toEqual([]);
     // The tools are still listed.
-    expect(run({ tools: "trust" }).tools).toHaveLength(8);
+    expect(run({ tools: "trust" }).tools).toHaveLength(9);
   });
 
   it("counts an MCP client's connection as network access, and a server talking to its client as none", () => {

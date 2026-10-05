@@ -1,0 +1,15 @@
+# Codecov's checks on pull requests (the badge comes from the coverage job in ci.yml).
+coverage:
+  status:
+    # The whole project: no lower than main, allowing a small dip when code moves.
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    # The lines a pull request adds or changes.
+    patch:
+      default:
+        target: 90%
+
+# The checks say enough; PermLang's own comment is the one to read.
+comment: false

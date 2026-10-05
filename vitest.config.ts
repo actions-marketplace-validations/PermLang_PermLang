@@ -6,10 +6,12 @@ export default defineConfig({
     // Building a ts-morph project with @types/node takes a few seconds.
     testTimeout: 60_000,
     hookTimeout: 60_000,
+    // Separate processes, not threads: test/run-cli.ts changes directory, which threads can't.
+    pool: "forks",
     coverage: {
       provider: "v8",
       include: ["src/**"],
-      // The CLI is tested by running it (test/cli.test.ts), in a child process coverage can't see.
+      // The two-line entry point; test/cli.test.ts runs it as a real process, which coverage can't see.
       exclude: ["src/cli.ts"],
       reporter: ["text-summary", "lcov"],
     },

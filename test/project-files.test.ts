@@ -132,6 +132,44 @@ describe("project configuration", () => {
   });
 });
 
+describe("project configuration: Actions in the repository, and Docker images", () => {
+  let repo: string;
+  beforeAll(() => {
+    repo = mkdtempSync(path.join(tmpdir(), "permlang-project-actions-"));
+    mkdirSync(path.join(repo, ".github", "actions", "deploy"), { recursive: true });
+    writeFileSync(
+      path.join(repo, ".github", "actions", "deploy", "action.yml"),
+      [
+        "name: Deploy",
+        "runs:",
+        "  using: composite",
+        "  steps:",
+        "    - uses: docker://alpine:3.20",
+        `    - uses: docker://node@sha256:${"a".repeat(64)}`,
+        "    - uses: acme/no-ref",
+      ].join("\n"),
+    );
+    writeFileSync(path.join(repo, "package.json"), "{ not json");
+  });
+  afterAll(() => rmSync(repo, { recursive: true, force: true }));
+
+  it("records composite Actions under .github/actions; an image is pinned only by its digest", () => {
+    const action = projectFiles(repo).find((f) => f.name === "<action.yml>")!;
+    expect(path.relative(repo, action.file)).toBe(path.join(".github", "actions", "deploy", "action.yml"));
+    expect(action.actual).toEqual([
+      "ci.action(acme/no-ref)",
+      "ci.action(docker://alpine)",
+      "ci.action(docker://node)",
+      "ci.unpinned(acme/no-ref)",
+      "ci.unpinned(docker://alpine)",
+    ]);
+  });
+
+  it("can't read a package.json that isn't JSON, and says so instead of passing it", () => {
+    expect(projectFiles(repo).find((f) => f.name === "<package.json>")!.actual).toEqual(["npm.unverifiable"]);
+  });
+});
+
 describe("project configuration in the check", () => {
   const code = () => {
     const file = path.join(dir, "app.ts");

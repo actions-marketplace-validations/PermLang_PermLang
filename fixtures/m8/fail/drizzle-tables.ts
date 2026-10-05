@@ -30,6 +30,31 @@ export async function relations(options: object) {
 }
 
 /** @perm db.read(leads) */
+export async function relationByKey() {
+  await db.query["secrets"]!.findMany(); // expect: error PERM001 db.read(secrets)
+}
+
+/** @perm db.read(leads) */
+export async function relationsSpread(rels: Record<string, true>) {
+  await db.query.leads!.findMany({ with: { ...rels } }); // expect: error PERM001 db.read
+}
+
+/** @perm db.read(leads) */
+export async function relationsVariable(rels: Record<string, true>) {
+  await db.query.leads!.findMany({ with: rels }); // expect: error PERM001 db.read
+}
+
+/** @perm db.read(leads), db.read(posts) */
+export async function relationsNestedVariable(nested: object) {
+  await db.query.leads!.findMany({ with: { posts: nested } }); // expect: error PERM001 db.read
+}
+
+/** @perm db.read(leads) */
+export async function columnsOnly() {
+  await db.query.leads!.findMany({ columns: { id: true } });
+}
+
+/** @perm db.read(leads) */
 export async function migrations() {
   await migrate(db, { migrationsFolder: "./drizzle" }); // expect: error PERM001 db.read expect: error PERM001 db.write
 }
