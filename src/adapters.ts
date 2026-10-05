@@ -266,6 +266,8 @@ function functionKey(d: Node): string | undefined {
     // A function-typed property or variable: the signature is its type; the name is on the holder.
     if (Node.isFunctionTypeNode(d) || Node.isArrowFunction(d) || Node.isFunctionExpression(d)) named = d.getParent() ?? d;
     member = "getName" in named ? (named as { getName(): string | undefined }).getName() : undefined;
+    // Bundled .d.ts files rename clashing declarations: `tool$1`, exported as `tool`.
+    member = member?.replace(/\$\d+$/, "");
   }
   if (!member) return undefined;
   const container = containerName(named);

@@ -5,12 +5,16 @@
 // its file's @module @perm tags.
 
 import path from "node:path";
-import { Project, ts, type Node } from "ts-morph";
+import { Node, Project, ts } from "ts-morph";
 import { AdapterError, AdapterIndex, loadAdapters } from "./adapters.js";
 import { UNVERIFIABLE, covers, formatCapability } from "./capability.js";
 import { detectInFile } from "./detect/index.js";
 import { Hierarchy } from "./dispatch.js";
 import { buildLock, lockDrift, type LockFile } from "./lock.js";
+import { projectFiles } from "./project-files.js";
+import { findTools, type ToolRegistration } from "./tools.js";
+import { flowDiagnostics, type FlowRule } from "./flows.js";
+import { resolveAlias } from "./detect/shared.js";
 import { unmappedPackages, unresolvedImports, type UnmappedPackage } from "./unmapped.js";
 import { collectEdges, pathTo, propagate, type Edge, type Reach } from "./graph.js";
 import {
@@ -22,6 +26,8 @@ import {
   isInNodeModules,
   isUnitNode,
   readModuleAnnotation,
+  unitNodeForDeclaration,
+  unitNodeForSymbol,
   type Unit,
   type Use,
 } from "./units.js";
@@ -38,9 +44,11 @@ export interface Diagnostic {
    * annotation, PERM004 unverifiable code (eval, computed calls on sensitive objects, ...),
    * PERM005 permissions that differ from permlang.lock.json, PERM006 calls into a
    * package with no adapter (what it touches isn't checked), PERM007 an import
-   * whose types can't be found (nothing called from it is checked).
+   * whose types can't be found (nothing called from it is checked), PERM008 a tool an AI
+   * model can call reaches something dangerous, PERM009 a function reads something a
+   * flow rule protects and can send it somewhere the rule doesn't allow.
    */
-  code: "PERM001" | "PERM002" | "PERM003" | "PERM004" | "PERM005" | "PERM006" | "PERM007" | SpecCode;
+  code: "PERM001" | "PERM002" | "PERM003" | "PERM004" | "PERM005" | "PERM006" | "PERM007" | "PERM008" | "PERM009" | SpecCode;
   file: string;
   line: number;
   column: number;
@@ -66,6 +74,8 @@ export interface FunctionReport {
   via: Record<string, string[]>;
   /** For each actual capability: where in this function it's reached (a direct use, or the call leading to it). */
   sites: Record<string, { line: number; column: number }>;
+  /** A configuration file (a workflow, an Action, package.json) rather than code; see project-files.ts. */
+  kind?: "config";
 }
 
 /** A function whose checks are suppressed by @perm-unsafe. Always reported. */
@@ -74,6 +84,18 @@ export interface UnsafeReport {
   line: number;
   function: string;
   reason: string;
+}
+
+/** A function registered as a tool an AI model can call, and what it reaches. */
+export interface ToolReport {
+  name: string;
+  /** The package it's registered with. */
+  framework: string;
+  file: string;
+  line: number;
+  /** The unit that registers it. */
+  function: string;
+  reaches: string[];
 }
 
 export interface Report {
@@ -87,6 +109,8 @@ export interface Report {
   unresolved: string[];
   /** Every function analyzed, including those that reach nothing (which `functions` leaves out). */
   units: { file: string; name: string; line: number }[];
+  /** Functions registered as tools an AI model can call. */
+  tools: ToolReport[];
 }
 
 /**
@@ -108,6 +132,15 @@ export interface CheckOptions {
   lock?: { file: string; contents: LockFile };
   /** How to report calls into packages with no adapter: warn (default), error, or trust (report only). */
   unmapped?: UnmappedPolicy;
+  /** How to report AI tools that reach something dangerous: warn (default), error, or trust (report only). */
+  tools?: UnmappedPolicy;
+  /** Where protected data may go: `{ from: env(STRIPE_KEY), to: [net(api.stripe.com)] }`. See flows.ts. */
+  flows?: readonly FlowRule[];
+  /**
+   * The repository root whose configuration is also recorded: its GitHub workflows and
+   * Actions, and package.json scripts (see project-files.ts). The CLI passes the lock's folder.
+   */
+  projectRoot?: string;
 }
 
 export type UnmappedPolicy = "warn" | "error" | "trust";
@@ -187,6 +220,9 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
     diagnostics.push(...diagnose(unit, edgesFrom.get(unit) ?? [], reach, strictness));
   }
 
+  // Configuration files are recorded like functions: what they grant, at the line that grants it.
+  if (options.projectRoot) functions.push(...projectFiles(options.projectRoot));
+
   const unsafe = [...units.values()].flatMap((u) =>
     u.own?.unsafe ? [{ file: u.file, line: u.own.unsafe.line, function: u.name, reason: u.own.unsafe.reason }] : [],
   );
@@ -235,6 +271,35 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
     }
   }
 
+  // Tools an AI model can call: listed always; a diagnostic when they reach something dangerous.
+  const tools: ToolReport[] = [];
+  const toolPolicy = options.tools ?? "warn";
+  for (const sourceFile of sourceFiles) {
+    for (const t of findTools(sourceFile)) {
+      const registrar = units.get(enclosingUnitNode(t.call))!;
+      const reaches = [...toolReach(t, registrar, units, reach, edgesFrom.get(registrar) ?? [])].sort();
+      const { line, column } = sourceFile.getLineAndColumnAtPos(t.call.getStart());
+      tools.push({ name: t.name, framework: t.framework, file: sourceFile.getFilePath(), line, function: registrar.name, reaches });
+      const risky = reaches.filter(isRiskyForTools);
+      if (toolPolicy === "trust" || risky.length === 0) continue;
+      diagnostics.push({
+        severity: toolPolicy === "error" ? "error" : "warning",
+        code: "PERM008",
+        file: sourceFile.getFilePath(),
+        line,
+        column,
+        function: registrar.name,
+        capability: t.name,
+        call: "",
+        message: `tool ${t.name} (${t.framework}) can be called by an AI model, and reaches ${risky.join(", ")}.`,
+        fix: "anyone who controls the model's input can trigger it: limit what the tool can do, validate its arguments, or have a person confirm before it runs.",
+      });
+    }
+  }
+
+  // Data-flow rules: a function that reads protected data and can send it elsewhere.
+  if (options.flows && options.flows.length > 0) diagnostics.push(...flowDiagnostics(units.values(), reach, options.flows));
+
   // Sketch reports everything but fails nothing.
   const checked = strictness === "sketch" ? diagnostics.map((d) => ({ ...d, severity: "warning" as const })) : diagnostics;
   const report: Report = {
@@ -245,6 +310,7 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
     unmapped,
     unresolved: unresolved.map((u) => u.specifier).sort(),
     units: [...units.values()].map((u) => ({ file: u.file, name: u.name, line: u.line })),
+    tools,
   };
   if (options.lock) {
     const root = path.dirname(options.lock.file);
@@ -252,6 +318,46 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
   }
   report.diagnostics = dedupe(report.diagnostics);
   return report;
+}
+
+// --- tools -------------------------------------------------------------------
+
+/**
+ * What a tool's handler can reach. A handler that is a unit (a named function, a method, a
+ * function-valued property) reaches what that unit reaches. An inline callback isn't a unit:
+ * its uses and calls are charged to the code around it, so those inside its body count.
+ * A handler that can't be found could be anything.
+ */
+function toolReach(tool: ToolRegistration, registrar: Unit, units: Map<Node, Unit>, reach: Reach, edges: readonly Edge[]): Set<string> {
+  const handler = tool.handler;
+  if (!handler) return new Set([UNVERIFIABLE]);
+  const named = Node.isIdentifier(handler) || Node.isPropertyAccessExpression(handler) ? handler.getSymbol() : undefined;
+  const unitNode = named ? unitNodeForSymbol(resolveAlias(named)) : unitNodeForDeclaration(handler);
+  const unit = unitNode && units.get(unitNode);
+  if (unit) return new Set(reach.get(unit)!.keys());
+  if (named || (!Node.isArrowFunction(handler) && !Node.isFunctionExpression(handler))) return new Set([UNVERIFIABLE]);
+
+  const sf = handler.getSourceFile();
+  const start = sf.getLineAndColumnAtPos(handler.getStart());
+  const end = sf.getLineAndColumnAtPos(handler.getEnd());
+  const inside = (p: { line: number; column: number }) =>
+    (p.line > start.line || (p.line === start.line && p.column >= start.column)) && (p.line < end.line || (p.line === end.line && p.column <= end.column));
+  const out = new Set<string>();
+  for (const use of registrar.uses) if (inside(use)) out.add(formatCapability(use.capability));
+  for (const edge of edges) if (inside(edge)) for (const key of reach.get(edge.to)!.keys()) out.add(key);
+  return out;
+}
+
+/**
+ * What a model shouldn't be able to trigger unchecked: running code or commands, writing
+ * files or data, sending to a host that isn't fixed, and actions adapters define
+ * (`payments.refund`, `email.send`). Reading from a known host or a table is what tools are for.
+ */
+export function isRiskyForTools(capability: string): boolean {
+  // Bare `net` is any host: the model can choose where data goes.
+  if (capability === "net") return true;
+  // Everything else is risky except reads: exec, writes, unverifiable code, and app-level actions.
+  return !["net", "fs.read", "db.read", "env"].includes(capability.split("(")[0]!);
 }
 
 // --- diagnostics -------------------------------------------------------------

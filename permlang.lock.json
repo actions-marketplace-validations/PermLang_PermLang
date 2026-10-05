@@ -1,6 +1,53 @@
 {
   "permlang": 1,
   "functions": {
+    ".github/workflows/ci.yml#<ci.yml>": [
+      "ci.action(actions/checkout)",
+      "ci.action(actions/setup-node)",
+      "ci.permission(contents: read)",
+      "ci.trigger(pull_request)",
+      "ci.trigger(push)"
+    ],
+    ".github/workflows/permlang.yml#<permlang.yml>": [
+      "ci.action(./)",
+      "ci.action(actions/checkout)",
+      "ci.permission(contents: read)",
+      "ci.permission(pull-requests: write)",
+      "ci.permission(security-events: write)",
+      "ci.trigger(pull_request)",
+      "ci.trigger(push)"
+    ],
+    ".github/workflows/release.yml#<release.yml>": [
+      "ci.action(actions/checkout)",
+      "ci.action(actions/setup-node)",
+      "ci.permission(contents: write)",
+      "ci.permission(id-token: write)",
+      "ci.trigger(release)"
+    ],
+    ".github/workflows/scorecard.yml#<scorecard.yml>": [
+      "ci.action(actions/checkout)",
+      "ci.action(ossf/scorecard-action)",
+      "ci.permission(actions: read)",
+      "ci.permission(contents: read)",
+      "ci.permission(id-token: write)",
+      "ci.trigger(push)",
+      "ci.trigger(schedule)",
+      "ci.trigger(workflow_dispatch)"
+    ],
+    "action.yml#<action.yml>": [
+      "ci.action(actions/cache/restore)",
+      "ci.action(actions/cache/save)",
+      "ci.action(actions/setup-node)",
+      "ci.action(github/codeql-action/upload-sarif)"
+    ],
+    "package.json#<package.json>": [
+      "npm.script(build: tsc -p tsconfig.build.json)",
+      "npm.script(permlang: tsx src/cli.ts)",
+      "npm.script(prepublishOnly: npm run typecheck && npm test && npm run build)",
+      "npm.script(test: vitest run)",
+      "npm.script(test:watch: vitest)",
+      "npm.script(typecheck: tsc --noEmit)"
+    ],
     "src/adapters.ts#builtinAdapterPaths": [
       "fs.read"
     ],
@@ -122,6 +169,18 @@
       "fs.read(package-lock.json)",
       "fs.read(pnpm-lock.yaml)",
       "fs.read(yarn.lock)"
+    ],
+    "src/project-files.ts#listFiles": [
+      "fs.read"
+    ],
+    "src/project-files.ts#packageEntry": [
+      "fs.read"
+    ],
+    "src/project-files.ts#projectFiles": [
+      "fs.read"
+    ],
+    "src/project-files.ts#yamlEntry": [
+      "fs.read"
     ],
     "src/spec/parse.ts#parseSpecs": [
       "fs.read"

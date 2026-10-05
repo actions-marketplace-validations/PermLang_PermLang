@@ -33,8 +33,8 @@ This writes three files. Commit all of them:
 
 | File | What it is |
 | --- | --- |
-| `permlang.config.json` | Settings. Starts at `"strictness": "sketch"`: everything is reported, and nothing fails yet. |
-| `permlang.lock.json` | What every function can reach today: network hosts, files, database tables, environment variables, processes. |
+| `permlang.config.json` | Settings. Starts at `"strictness": "sketch"`: everything is reported, and only new access the lock doesn't record fails. |
+| `permlang.lock.json` | What every function can reach today (network hosts, files, database tables, environment variables, processes), and what your workflows and `package.json` scripts grant (token permissions, secrets, Actions, install hooks). |
 | `.github/workflows/permlang.yml` | Installs your dependencies (for their types), then runs PermLang on every pull request and comments the permission diff. |
 
 ## 3. Review what you have
@@ -43,7 +43,7 @@ This writes three files. Commit all of them:
 npx permlang check src
 ```
 
-Look at three things:
+Look at four things:
 
 - **Packages with no adapter.** PermLang can't see what these touch, so it
   trusts them. Each gets one warning (PERM006). For each one, either add an
@@ -53,8 +53,13 @@ Look at three things:
 - **Unverifiable code** (PERM004): `eval`, `new Function`, computed calls on
   `fs` or `globalThis`, `require` of a computed path. Rewrite it, or mark the
   function `@perm-unsafe reason:"..."`. Every override is listed in every report.
-- **The lock file.** It's the inventory of what your code can touch. Anything
-  surprising in it is worth a look now.
+- **Tools an AI model can call** (if you use MCP, the Vercel AI SDK, OpenAI
+  Agents, or LangChain). The report lists each tool and what it can reach. A
+  tool that can run commands, write data, or send to any address gets a warning
+  (PERM008): whoever controls the model's input can trigger it. Narrow what the
+  tool can do, or have a person confirm before it runs.
+- **The lock file.** It's the inventory of what your code can touch, and what
+  your CI and scripts grant. Anything surprising in it is worth a look now.
 
 ## 4. Work with the lock
 
@@ -99,7 +104,17 @@ Then raise `"strictness"` in `permlang.config.json`:
   functions must declare what they reach.
 - `production`: every function must be covered, private helpers included.
 
-Set `"unmapped": "error"` to require every package to be mapped or declared pure.
+Set `"unmapped": "error"` to require every package to be mapped or declared pure,
+and `"tools": "error"` to fail the build on risky AI tools.
+
+To say where a secret may go, add a flow rule. This fails any change that lets
+the Stripe key reach a server other than Stripe's:
+
+```json
+{ "flows": [{ "from": "env(STRIPE_KEY)", "to": ["net(api.stripe.com)"] }] }
+```
+
+Every setting is listed in the [reference](reference.md#configuration).
 
 ## 6. Show it (optional)
 

@@ -15,7 +15,7 @@ export const COMMENT_MARKER = "<!-- permlang-diff -->";
  * Whether the code reaches access the lock file doesn't record yet, which lock file, and the
  * packages the change adds (shown for review; they don't fail the check).
  */
-export type DiffNotes = { unrecorded?: boolean; lockFile?: string; dependencies?: DependencyChange[] };
+export type DiffNotes = { unrecorded?: boolean; lockFile?: string; dependencies?: DependencyChange[]; aiTools?: Record<string, string[]> };
 
 const KNOWN: Record<DependencyChange["known"], string> = {
   adapter: "Checked by an adapter",
@@ -57,7 +57,10 @@ export function formatDiffMarkdown(diff: LockDiff, via: ViaPaths, notes: DiffNot
       const origin = shortestPath(capability, functions, via);
       const where = origin ? `${code(origin.fn.name)}<br><sub>${text(origin.path.join(" → "))}</sub>` : "";
       const reachable = functions.map((f) => `${code(f.name)}${f.status === "added" ? " (new)" : ""}`).join(", ");
-      lines.push(`| ${code(`+ ${capability}`)} | ${where} | ${reachable} |`);
+      // An AI model can trigger it: whoever controls the model's input can, too.
+      const tools = [...new Set(notes.aiTools?.[capability] ?? [])];
+      const byModel = tools.length > 0 ? `<br><sub>⚠️ An AI model can trigger this, through ${tools.map((t) => code(t)).join(", ")}</sub>` : "";
+      lines.push(`| ${code(`+ ${capability}`)} | ${where} | ${reachable}${byModel} |`);
     }
     lines.push("");
   }
@@ -99,7 +102,7 @@ export function formatDiffText(diff: LockDiff, via: ViaPaths, notes: DiffNotes =
   for (const f of diff.functions) {
     const head = `${f.file} ${f.name}${f.status === "added" ? " (new)" : f.status === "removed" ? " (removed)" : ""}`;
     const rows = [
-      ...f.added.map((c) => `  + ${c}${via[f.key]?.[c] ? `  via ${via[f.key]![c]!.join(" → ")}` : ""}`),
+      ...f.added.map((c) => `  + ${c}${via[f.key]?.[c] ? `  via ${via[f.key]![c]!.join(" → ")}` : ""}${notes.aiTools?.[c] ? `  (an AI model can trigger this: ${[...new Set(notes.aiTools[c])].join(", ")})` : ""}`),
       ...f.removed.map((c) => `  - ${c}`),
     ];
     out.push([head, ...rows].join("\n"));

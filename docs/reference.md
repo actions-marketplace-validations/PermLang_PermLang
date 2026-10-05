@@ -95,8 +95,20 @@ it can't see yet. New here? Start with [getting started](getting-started.md).
   sensitive objects (`fs[method]()`, `globalThis[name]()`) or behind an index
   signature (`table[name]()`). The only way to accept it is `@perm-unsafe`,
   which also stops it from failing the function's callers.
-- **Strictness levels, a lock file, a permission diff for pull requests, and a
-  GitHub Action.** See below.
+- **Project configuration (PERM005).** GitHub workflows, Actions, and
+  `package.json` scripts are recorded in the lock like code: token permissions,
+  secrets, Actions and whether they're pinned, install hooks. See
+  [project configuration](#project-configuration).
+- **Tools given to AI models (PERM008).** Functions registered as AI tools, and
+  what a model can trigger through them. See
+  [tools given to AI models](#tools-given-to-ai-models).
+- **Data-flow rules (PERM009).** Where a secret or sensitive data may be sent.
+  See [data-flow rules](#data-flow-rules).
+- **New dependencies** in the permission diff, with what PermLang sees of each
+  and its install scripts.
+- **Strictness levels, a lock file, a permission diff for pull requests, a
+  GitHub Action with line annotations and code scanning, and SARIF output.** See
+  below.
 
 ### Known limits
 
@@ -144,6 +156,28 @@ Other gaps, not yet in fixtures:
 - Lock keys for same-named functions in one file (`#2`, `#3`) follow source
   order, so adding one can renumber the others and show spurious lock changes.
 
+## Configuration
+
+`permlang.config.json`, next to the lock file. Every setting is optional.
+
+```json
+{
+  "strictness": "development",
+  "unmapped": "warn",
+  "tools": "warn",
+  "adapters": ["./permlang/adapters/acme-sms.json"],
+  "flows": [{ "from": "env(STRIPE_KEY)", "to": ["net(api.stripe.com)"] }]
+}
+```
+
+| Setting | Values | Meaning |
+| --- | --- | --- |
+| `strictness` | `sketch`, `development` (default), `production` | What fails the build. See [strictness levels](#strictness-levels). The `--strictness` option overrides it. |
+| `unmapped` | `warn` (default), `error`, `trust` | Calls into packages with no adapter, and imports with no types. See [packages without an adapter](#packages-without-an-adapter). The `--unmapped` option overrides it. |
+| `tools` | `warn` (default), `error`, `trust` | AI tools that reach something dangerous. See [tools given to AI models](#tools-given-to-ai-models). |
+| `adapters` | paths | Your own adapter manifests, relative to the config file. See [adapter manifests](#adapter-manifests). |
+| `flows` | rules | Where protected data may go. See [data-flow rules](#data-flow-rules). |
+
 ## Diagnostic codes
 
 | Code | Severity | Meaning |
@@ -155,6 +189,8 @@ Other gaps, not yet in fixtures:
 | `PERM005` | error, or warning when access was removed | The code reaches something `permlang.lock.json` doesn't record, or no longer reaches something it does. |
 | `PERM006` | warning, by default | A call into a package with no adapter: what it touches isn't checked. See [packages without an adapter](#packages-without-an-adapter). |
 | `PERM007` | warning, by default | An import whose types can't be found, so nothing called from it is checked. |
+| `PERM008` | warning, by default | A tool an AI model can call reaches something dangerous. See [tools given to AI models](#tools-given-to-ai-models). |
+| `PERM009` | error | A function reads data a flow rule protects and can send it somewhere the rule doesn't allow. See [data-flow rules](#data-flow-rules). |
 | `SPEC001`–`SPEC004` | error or warning | Problems with `.perm` specs: see [specs](#specs-phase-2-groundwork). |
 
 Sketch strictness reports everything but fails only on `PERM005`.
@@ -174,6 +210,112 @@ Wildcards (`*`) are not allowed. A capability without an argument (`net`,
 determined statically, for example `fetch(url)` or a template path like
 `` `./data/${name}` ``. *(Provisional: this answers open question 1 in the design
 doc and may change after review.)*
+
+## Data-flow rules
+
+`@perm` says what a function may touch. A flow rule says where protected data
+may *go*: "the Stripe key may only be sent to Stripe".
+
+```json
+{
+  "flows": [
+    { "from": "env(STRIPE_KEY)", "to": ["net(api.stripe.com)"] },
+    { "from": "db.read(customers)", "to": ["net(api.hubspot.com)"] }
+  ]
+}
+```
+
+A function that reads the `from` capability directly, and can send to a host
+`to` doesn't list, is a `PERM009` error. That covers sending itself or through
+anything it calls, and a host that can't be determined (`fetch(url)`). The
+error points at the call that leads there:
+
+```
+src/billing.ts:7:9 error PERM009: charge reads env(STRIPE_KEY) and can send to net(analytics.example),
+  through track → fetch("https://analytics.example/event", ...), which the flow rule for env(STRIPE_KEY) doesn't allow.
+```
+
+A `from` without a scope covers a whole category: `"env"` protects every
+environment variable. Reading the whole environment (`JSON.stringify(process.env)`)
+counts as reading every variable.
+
+**This first version works per function.** It doesn't follow the value itself:
+a key read into a module-level constant and used by another function isn't
+caught, and neither is one passed to a callee as an argument. Callers of a
+function that reads the key aren't flagged, since the key stays inside it. Only
+network hosts are checked as destinations.
+
+## Tools given to AI models
+
+A function registered as a tool for an AI model runs when the model decides to
+call it, and the model does what its input tells it to. So whoever controls that
+input (a user, a web page the model reads, an email it summarizes) can trigger
+the tool. If the tool can run commands, that's prompt injection turned into
+code execution.
+
+PermLang finds tool registrations and works out what each tool's handler can
+reach, through everything it calls:
+
+| Framework | Recognized |
+| --- | --- |
+| Vercel AI SDK (`ai`) | `tool({ execute })`, `dynamicTool(...)` |
+| MCP (`@modelcontextprotocol/sdk`) | `server.tool(name, ..., handler)`, `server.registerTool(name, config, handler)`, and `setRequestHandler(CallToolRequestSchema, handler)`, which serves every tool (named `*`) |
+| OpenAI Agents (`@openai/agents`) | `tool({ name, execute })` |
+| LangChain (`@langchain/core`, `langchain`) | `tool(func, ...)`, `new DynamicStructuredTool({ func })`, and other `new ...Tool(...)` classes |
+| Anthropic, Mastra, LlamaIndex | their `tool`/`createTool`/`betaTool`-style helpers with an `execute`, `run`, or `func` handler |
+
+Every tool is listed in the report, with what it reaches. When a tool reaches
+something a model shouldn't trigger unchecked, there's a `PERM008` warning at
+the registration:
+
+- running commands (`exec`) or code that can't be verified;
+- writing files or data (`fs.write`, `db.write`);
+- sending to a host that isn't fixed (bare `net`), since the model can choose
+  where data goes;
+- app-level actions from adapters, such as `payments.refund` or `email.send`.
+
+Reading files, tables, environment variables, or a fixed host doesn't warn: that's
+what tools are for. Set `"tools"` in `permlang.config.json` to `"error"` to fail
+the build instead, or `"trust"` to only list them.
+
+In the pull-request comment, new access a tool can reach is marked *An AI model
+can trigger this*, with the tool's name.
+
+A handler PermLang can't find (passed in from elsewhere, say) counts as
+unverifiable. Tools registered through a wrapper of your own aren't recognized
+yet.
+
+## Project configuration
+
+Workflows and scripts grant as much as code does, and AI agents edit them as
+readily. So the lock also records, for the folder it lives in:
+
+- **GitHub workflows** (`.github/workflows/*.yml`), and **composite Actions**
+  (`action.yml`, `.github/actions/**/action.yml`);
+- **`package.json` scripts.**
+
+Each file is an entry in the lock, keyed by its path (for example
+`.github/workflows/ci.yml#<ci.yml>`), and what it grants are its capabilities:
+
+| Capability | Meaning |
+| --- | --- |
+| `ci.trigger(event)` | An event the workflow runs on, such as `pull_request_target`. |
+| `ci.permission(scope: level)` | A token permission a job gets, from its own `permissions:` or the workflow's. `ci.permission(write-all)` and `ci.permission(read-all)` for the shorthands; `ci.permission(default)` when neither sets any, so the token gets the repository's default, which can be write access to everything. |
+| `ci.secret(NAME)` | A secret the file reads (`secrets.NAME`). `ci.secret(inherit)` for `secrets: inherit`; `ci.secret(all)` for `toJSON(secrets)`. |
+| `ci.action(owner/repo)` | An Action or reusable workflow a step or job runs (`uses:`). |
+| `ci.unpinned(owner/repo)` | ...referenced by a tag or branch rather than an exact commit, so what runs can change without a change here. |
+| `npm.script(name: command)` | A `package.json` script and its command, lifecycle hooks such as `postinstall` included. |
+| `ci.unverifiable`, `npm.unverifiable` | A file PermLang can't parse. It's recorded rather than skipped, so it can't hide anything. |
+
+A change that adds one fails the check (`PERM005`) at the line that grants it,
+and shows in the pull-request comment, until `permlang lock` records it. That's
+the same review gate as for code. Updating a pinned Action to a new commit
+doesn't change the lock, but switching it to a tag does. Steps' `run:` commands
+aren't recorded yet.
+
+**Upgrading from 0.2:** a lock written before 0.3 records no configuration. The
+first check after upgrading reports each entry as a warning instead of failing,
+and `permlang lock` records them.
 
 ## Adapter manifests
 
@@ -242,8 +384,8 @@ Set `"strictness"` in `permlang.config.json`, or pass `--strictness`:
 
 ## The lock file and the permission diff
 
-`permlang lock` writes `permlang.lock.json`: what every function can reach. Commit
-it. From then on:
+`permlang lock` writes `permlang.lock.json`: what every function can reach, and what
+every workflow, Action, and `package.json` script grants. Commit it. From then on:
 
 - **`permlang check` fails when the code reaches something the lock doesn't
   record** (PERM005), at every strictness level, sketch included. New access
@@ -422,10 +564,14 @@ src/dispatch.ts     implementations reachable through interfaces and base classe
 src/units.ts        functions, methods, and files that permissions attach to
 src/graph.ts        the call graph and propagation along it
 src/unmapped.ts     packages with no adapter, and imports with no types
+src/project-files.ts workflows, Actions, and package.json scripts, as lock entries
+src/tools.ts        tool registrations for AI models, and their handlers
+src/flows.ts        data-flow rules: parsing, and finding functions that break them
+src/deps.ts         new dependencies in a change
 src/check.ts        comparing declared vs. actual per unit
 src/lock.ts         permlang.lock.json: build, read, compare
 src/diff.ts         the permission diff, as text or a pull-request comment
-src/report.ts       text and JSON output
+src/report.ts       text, JSON, GitHub annotation, and SARIF output
 src/cli.ts          the permlang command
 src/index.ts        the library API
 src/spec/           .perm specs: parsing and checking

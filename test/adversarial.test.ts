@@ -133,6 +133,8 @@ describe("reported as the access it is", () => {
   it("a21_namespace_bracket", () => expect(capabilities("a21_namespace_bracket")).toEqual(["exec"]));
   it("c06_process_env_any", () => expect(capabilities("c06_process_env_any")).toEqual(["env(SECRET)"]));
   it("a31_window_self", () => expect(capabilities("a31_window_self")).toEqual(["net"]));
+  // new URL(path, base) with literal parts names its host.
+  it("a22_new_url", () => expect(capabilities("a22_new_url")).toEqual(["net(evil.example)"]));
 });
 
 describe("silent", () => {

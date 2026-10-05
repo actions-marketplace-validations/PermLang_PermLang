@@ -2,6 +2,60 @@
 
 All notable changes to PermLang.
 
+## 0.3.1 (2026-10-05)
+
+### Fixed
+
+- Tools made with the Vercel AI SDK v7's `tool()` weren't found. The SDK
+  declares it in `@ai-sdk/provider-utils`, under a bundler's rename
+  (`tool$1`), and `ai` re-exports it. PermLang now recognizes the `@ai-sdk/*`
+  packages and ignores rename suffixes like `$1`, for tools and for adapter
+  keys. `@ai-sdk/provider-utils` is covered by the AI SDK adapter, with `tool()`
+  and the schema helpers touching nothing.
+
+## 0.3.0 (2026-10-05)
+
+This release can fail builds that passed before, when a pull request changes
+what a workflow or script grants. Upgrading itself doesn't: see below.
+
+### Added
+
+- **Project configuration in the lock.** GitHub workflows, composite Actions,
+  and `package.json` scripts are recorded like functions: their triggers, token
+  permissions per job, secrets, Actions (and whether they're pinned to a
+  commit), and scripts. A change that adds a permission, a secret, an unpinned
+  Action, or a `postinstall` hook fails the check at that line and shows in the
+  pull-request comment, until `permlang lock` records it.
+- A lock written before 0.3 has no configuration in it. The first check after
+  upgrading reports it as warnings, not failures; run `permlang lock` to record
+  it.
+- **Tools given to AI models.** PermLang finds functions registered as tools
+  (Vercel AI SDK, MCP, OpenAI Agents, LangChain, and others), works out what
+  each one reaches, and lists them in the report. A tool that reaches commands,
+  writes, unverifiable code, a host the model can choose, or an app-level action
+  like `payments.refund` gets a `PERM008` warning, since whoever controls the
+  model's input can trigger it. `"tools": "error"` fails the build instead. The
+  pull-request comment marks new access a model can trigger.
+- **Data-flow rules.** `"flows"` in `permlang.config.json` says where protected
+  data may go, such as `{ "from": "env(STRIPE_KEY)", "to": ["net(api.stripe.com)"] }`.
+  A function that reads the source and can send to any other host, itself or
+  through what it calls, is a `PERM009` error. This first version works per
+  function and doesn't follow the value itself; see the reference.
+
+### Fixed
+
+- Declaring a tool with the Vercel AI SDK's `tool()` no longer counts as network
+  access.
+- The MCP adapter counted every SDK call as network access to any host. A server
+  talking to its connected client (`sendLoggingMessage`, `listRoots`,
+  `createMessage`, registering tools and prompts) reaches nothing; a client's
+  HTTP, SSE, or WebSocket transport reaches the host it connects to, and a stdio
+  transport counts as `exec`. On the official MCP example servers, this took
+  the tool warnings from 10 to the 1 real one (a tool that fetches a URL the
+  model chooses).
+- `new URL("/path", "https://host")` with literal parts now names its host, for
+  `fetch` and adapters, instead of counting as any host.
+
 ## 0.2.4 (2026-10-02)
 
 ### Added

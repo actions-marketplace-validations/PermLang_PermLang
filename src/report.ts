@@ -12,6 +12,8 @@ const RULES: Record<Diagnostic["code"], string> = {
   PERM005: "The code reaches something permlang.lock.json doesn't record, or no longer reaches something it does.",
   PERM006: "A call into a package with no adapter: what it touches isn't checked.",
   PERM007: "An import whose types can't be found: nothing called from it is checked.",
+  PERM008: "A tool an AI model can call reaches something dangerous, such as running commands or writing data.",
+  PERM009: "A function reads data a flow rule protects and can send it somewhere the rule doesn't allow.",
   SPEC001: "A .perm spec file is invalid.",
   SPEC002: "A .perm spec's implementation can't be found.",
   SPEC003: "A spec's implementation reaches something its perms don't allow.",
@@ -75,6 +77,10 @@ export function formatText(report: Report, cwd = process.cwd()): string {
     const more = report.unmapped.length > 10 ? `, and ${report.unmapped.length - 10} more (see --json)` : "";
     lines.push(`${plural(report.unmapped.length, "package")} with no adapter, trusted (calls): ${shown}${more}.`);
   }
+  if (report.tools.length > 0) {
+    const entries = report.tools.map((t) => `  ${relative(t.file, cwd)}:${t.line} ${t.name} (${t.framework}): ${t.reaches.length > 0 ? t.reaches.join(", ") : "nothing tracked"}`);
+    lines.push([`${plural(report.tools.length, "tool")} an AI model can call:`, ...entries].join("\n"));
+  }
   if (report.unsafe.length > 0) {
     const entries = report.unsafe.map((u) => `  ${relative(u.file, cwd)}:${u.line} ${u.function}: ${u.reason}`);
     lines.push([`${plural(report.unsafe.length, "@perm-unsafe override")} (checks suppressed):`, ...entries].join("\n"));
@@ -105,6 +111,7 @@ export function toJson(report: Report, cwd = process.cwd()): string {
       unsafe: report.unsafe.map((u) => ({ ...u, file: relative(u.file, cwd) })),
       unmapped: report.unmapped.map((u) => ({ ...u, file: relative(u.file, cwd) })),
       unresolved: report.unresolved,
+      tools: report.tools.map((t) => ({ ...t, file: relative(t.file, cwd) })),
     },
     null,
     2,

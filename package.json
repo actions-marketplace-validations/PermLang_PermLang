@@ -1,6 +1,6 @@
 {
   "name": "permlang",
-  "version": "0.2.4",
+  "version": "0.3.1",
   "description": "The permission diff for AI-written TypeScript. Declare what each function can touch; the build fails when code exceeds it.",
   "keywords": [
     "permissions",
@@ -10,6 +10,10 @@
     "security",
     "code-review",
     "ai-generated-code",
+    "ai-agents",
+    "mcp",
+    "github-actions",
+    "supply-chain-security",
     "lint"
   ],
   "homepage": "https://github.com/PermLang/permlang#readme",
@@ -44,7 +48,8 @@
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
-    "ts-morph": "^27.0.0"
+    "ts-morph": "^27.0.0",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

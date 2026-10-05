@@ -171,6 +171,16 @@ export function hostOf(arg: Node | undefined): string | undefined {
   if (Node.isTemplateExpression(arg)) {
     return templateHost(arg.getHead().getLiteralText());
   }
+  // new URL("https://host/path") or new URL("/path", "https://host"), with literal parts.
+  if (Node.isNewExpression(arg) && isGlobalUrl(arg.getExpression())) {
+    const [input, base] = arg.getArguments().map((a) => literalString(a));
+    if (input === undefined || (arg.getArguments().length > 1 && base === undefined)) return undefined;
+    try {
+      return new URL(input, base).hostname || undefined;
+    } catch {
+      return undefined;
+    }
+  }
   if (Node.isObjectLiteralExpression(arg)) {
     const prop = (name: string) => {
       const p = arg.getProperty(name);
@@ -183,4 +193,11 @@ export function hostOf(arg: Node | undefined): string | undefined {
     return host?.replace(/:\d+$/, "").toLowerCase() || undefined;
   }
   return undefined;
+}
+
+/** The global `URL` class, not a local one with the same name. */
+function isGlobalUrl(expression: Node): boolean {
+  if (!Node.isIdentifier(expression) || expression.getText() !== "URL") return false;
+  const declarations = expression.getSymbol()?.getDeclarations() ?? [];
+  return declarations.length > 0 && declarations.every((d) => d.getSourceFile().isDeclarationFile());
 }

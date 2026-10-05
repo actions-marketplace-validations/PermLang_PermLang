@@ -22,6 +22,7 @@
     "util",
     "zlib",
     "zod",
+    "yaml",
     "date-fns",
     "big.js",
     "decimal.js",

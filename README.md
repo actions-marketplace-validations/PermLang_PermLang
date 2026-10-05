@@ -62,6 +62,16 @@ In words: *this change makes the code send data to `api.data-broker.io` from
 | 🔑 | **Secrets**: environment variables like API keys | Reading the Stripe key | `env(STRIPE_KEY)` |
 | ⚙️ | **System commands**: running other programs | Starting a script | `exec` |
 | 🧩 | **Your own actions**, defined per library | Issuing a refund | `payments.refund` |
+| 🛠️ | **Your CI and scripts**: workflow permissions, secrets, Actions, install hooks | A workflow gaining write access | `ci.permission(contents: write)` |
+
+It also flags two things code review rarely catches:
+
+- **🤖 Tools you give an AI model.** A function registered as an AI tool (MCP,
+  the Vercel AI SDK, OpenAI Agents, LangChain) can be triggered by whoever
+  controls the model's input. PermLang lists every tool and what it can reach,
+  and warns when a model could run commands, write data, or send to any address.
+- **🔒 Where secrets may go.** A rule like *"the Stripe key may only be sent to
+  Stripe"* fails any change that lets the key reach another server.
 
 ## Going further: rules in the code
 

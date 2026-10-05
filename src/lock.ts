@@ -96,15 +96,20 @@ export function lockDrift(committed: LockFile, current: LockFile, report: Report
   const locations = new Map(keyed(report, root).map(({ key, fn }) => [key, fn]));
   const out: Diagnostic[] = [];
   const fix = "run `permlang lock` and commit the change so reviewers see it.";
+  // Locks written before PermLang recorded configuration (0.3) have none of it. Its first
+  // appearance is reported, but doesn't fail the build: nothing in it is new.
+  const configRecorded = Object.keys(committed.functions).some(isConfigKey);
 
   for (const change of diffLocks(committed, current).functions) {
     const fn = locations.get(change.key);
     const at = fn ? { file: fn.file, line: fn.line } : { file: lockFile, line: 1 };
+    const config = isConfigKey(change.key);
     for (const capability of change.added) {
       // At the line that reaches it, so the error (and its pull-request annotation) lands on the change.
       const site = fn?.sites[capability];
+      const unrecorded = config && !configRecorded;
       out.push({
-        severity: "error",
+        severity: unrecorded ? "warning" : "error",
         code: "PERM005",
         ...at,
         ...(site ? { line: site.line } : {}),
@@ -112,7 +117,11 @@ export function lockDrift(committed: LockFile, current: LockFile, report: Report
         function: change.name,
         capability,
         call: "",
-        message: `${change.name} can now reach ${capability}, which ${lockName} doesn't record.`,
+        message: unrecorded
+          ? `${lockName} doesn't record project configuration yet (PermLang 0.3 adds it): ${change.file} grants ${capability}.`
+          : config
+            ? `${change.file} now grants ${capability}, which ${lockName} doesn't record.`
+            : `${change.name} can now reach ${capability}, which ${lockName} doesn't record.`,
         fix,
       });
     }
@@ -125,7 +134,9 @@ export function lockDrift(committed: LockFile, current: LockFile, report: Report
         function: change.name,
         capability,
         call: "",
-        message: `${change.name} ${change.status === "removed" ? "no longer exists or" : "no longer"} reaches ${capability}, but ${lockName} still records it.`,
+        message: config
+          ? `${change.file} ${change.status === "removed" ? "no longer exists or" : "no longer"} grants ${capability}, but ${lockName} still records it.`
+          : `${change.name} ${change.status === "removed" ? "no longer exists or" : "no longer"} reaches ${capability}, but ${lockName} still records it.`,
         fix,
       });
     }
@@ -142,6 +153,11 @@ export interface FunctionChange {
   status: "added" | "removed" | "changed";
   added: string[];
   removed: string[];
+}
+
+/** A configuration file's entry (`.github/workflows/ci.yml#<ci.yml>`), not a function's. */
+export function isConfigKey(key: string): boolean {
+  return /#<[^<>#]+\.(?:ya?ml|json)>$/.test(key);
 }
 
 export interface LockDiff {
