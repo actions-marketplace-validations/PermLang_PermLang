@@ -71,7 +71,7 @@ declaration from any `@perm` on the function; both are checked.
 
 ## What comes next
 
-These are the later phases in the concept overview:
+These are the later phases planned for specs:
 
 1. **Examples as tests.** Run each example against the implementation. That needs
    a precise mapping from example syntax to calls, which is still open.

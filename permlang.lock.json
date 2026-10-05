@@ -22,8 +22,11 @@
     ".github/workflows/release.yml#<release.yml>": [
       "ci.action(actions/attest)",
       "ci.action(actions/checkout)",
+      "ci.action(actions/download-artifact)",
       "ci.action(actions/setup-node)",
+      "ci.action(actions/upload-artifact)",
       "ci.permission(attestations: write)",
+      "ci.permission(contents: read)",
       "ci.permission(contents: write)",
       "ci.permission(id-token: write)",
       "ci.trigger(release)"
@@ -45,7 +48,7 @@
       "ci.action(github/codeql-action/upload-sarif)"
     ],
     "package.json#<package.json>": [
-      "npm.script(build: tsc -p tsconfig.build.json)",
+      "npm.script(build: node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json)",
       "npm.script(permlang: tsx src/cli.ts)",
       "npm.script(prepublishOnly: npm run typecheck && npm test && npm run build)",
       "npm.script(test: vitest run)",
@@ -72,15 +75,10 @@
       "env(GITHUB_WORKSPACE)",
       "exec",
       "fs.read",
-      "fs.read(.github/workflows/permlang.yml)",
-      "fs.read(package-lock.json)",
       "fs.read(package.json)",
       "fs.read(permlang.config.json)",
-      "fs.read(pnpm-lock.yaml)",
       "fs.read(tsconfig.json)",
-      "fs.read(yarn.lock)",
-      "fs.write",
-      "fs.write(.github/workflows/permlang.yml)"
+      "fs.write"
     ],
     "src/main.ts#analyze": [
       "fs.read",
@@ -93,6 +91,9 @@
       "fs.read(permlang.config.json)",
       "fs.read(tsconfig.json)",
       "fs.write"
+    ],
+    "src/main.ts#defaultBranch": [
+      "exec"
     ],
     "src/main.ts#dependencyChanges": [
       "exec",
@@ -116,21 +117,19 @@
     "src/main.ts#findSpecFiles": [
       "fs.read"
     ],
+    "src/main.ts#gitRoot": [
+      "exec",
+      "fs.write"
+    ],
     "src/main.ts#init": [
+      "exec",
       "fs.read",
-      "fs.read(.github/workflows/permlang.yml)",
-      "fs.read(package-lock.json)",
       "fs.read(permlang.config.json)",
-      "fs.read(pnpm-lock.yaml)",
       "fs.read(tsconfig.json)",
-      "fs.read(yarn.lock)",
-      "fs.write",
-      "fs.write(.github/workflows/permlang.yml)"
+      "fs.write"
     ],
     "src/main.ts#installSteps": [
-      "fs.read(package-lock.json)",
-      "fs.read(pnpm-lock.yaml)",
-      "fs.read(yarn.lock)"
+      "fs.read"
     ],
     "src/main.ts#installed": [
       "fs.read"
@@ -148,15 +147,10 @@
       "env(GITHUB_WORKSPACE)",
       "exec",
       "fs.read",
-      "fs.read(.github/workflows/permlang.yml)",
-      "fs.read(package-lock.json)",
       "fs.read(package.json)",
       "fs.read(permlang.config.json)",
-      "fs.read(pnpm-lock.yaml)",
       "fs.read(tsconfig.json)",
-      "fs.read(yarn.lock)",
-      "fs.write",
-      "fs.write(.github/workflows/permlang.yml)"
+      "fs.write"
     ],
     "src/main.ts#packageVersion": [
       "fs.read"
@@ -171,9 +165,12 @@
       "fs.read(tsconfig.json)"
     ],
     "src/main.ts#workflowFile": [
-      "fs.read(package-lock.json)",
-      "fs.read(pnpm-lock.yaml)",
-      "fs.read(yarn.lock)"
+      "exec",
+      "fs.read"
+    ],
+    "src/main.ts#workflowTarget": [
+      "exec",
+      "fs.write"
     ],
     "src/project-files.ts#listFiles": [
       "fs.read"

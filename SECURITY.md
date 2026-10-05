@@ -40,10 +40,12 @@ that can't happen.
 
 ## Verifying a release
 
-Releases are built and published by the
-[release workflow](.github/workflows/release.yml), never from a laptop. From
-0.3.2, each package is signed with a SLSA build provenance attestation, which
-says which repository, workflow, and commit built it.
+Since 0.1.1, releases are built and published by the
+[release workflow](.github/workflows/release.yml), never from a laptop (0.1.0,
+the first, was published by hand to create the package). The job that
+publishes installs nothing, so no dependency's code runs with the right to
+publish. From 0.3.2, each package is signed with a SLSA build provenance
+attestation, which says which repository, workflow, and commit built it.
 
 To check a package from npm with the [GitHub CLI](https://cli.github.com):
 

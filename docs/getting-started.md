@@ -28,6 +28,7 @@ npx permlang init src --workflow
 ```
 
 Use `--project tsconfig.json` instead of `src` to check a TypeScript project's files.
+In a monorepo, run it in the package you want checked.
 
 This writes three files. Commit all of them:
 
@@ -51,8 +52,10 @@ Look at four things:
   team adapter file, listed under `"adapters"` in `permlang.config.json`, does
   either.
 - **Unverifiable code** (PERM004): `eval`, `new Function`, computed calls on
-  `fs` or `globalThis`, `require` of a computed path. Rewrite it, or mark the
-  function `@perm-unsafe reason:"..."`. Every override is listed in every report.
+  `fs` or `globalThis`, `require` of a computed path. It's reported on the
+  exported function that reaches it, and the lock records every use. Rewrite
+  it, or mark the function `@perm-unsafe reason:"..."`. Every override is
+  listed in every report.
 - **Tools an AI model can call** (if you use MCP, the Vercel AI SDK, OpenAI
   Agents, or LangChain). The report lists each tool and what it can reach. A
   tool that can run commands, write data, or send to any address gets a warning
@@ -66,7 +69,7 @@ Look at four things:
 From now on, when a change gives code new access, `permlang check` fails:
 
 ```
-src/leads.ts:8:1 error PERM005: handleLead can now reach net(api.data-broker.io), which permlang.lock.json doesn't record.
+src/leads.ts:5:9 error PERM005: handleLead can now reach net(api.data-broker.io), which permlang.lock.json doesn't record.
   -> run `permlang lock` and commit the change so reviewers see it.
 ```
 

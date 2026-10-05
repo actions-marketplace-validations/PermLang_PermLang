@@ -1,6 +1,6 @@
 {
   "name": "permlang",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Build-time permission checker for TypeScript and AI agents. Fails the pull request when code starts reaching a new server, file, secret, database table, risky MCP tool, or CI permission.",
   "keywords": [
     "permissions",
@@ -46,10 +46,10 @@
     "NOTICE"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20.1"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

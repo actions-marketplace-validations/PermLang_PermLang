@@ -2,6 +2,37 @@
 
 All notable changes to PermLang.
 
+## 0.3.3 (2026-10-05)
+
+Fixes to `permlang init`. If you generated a workflow for a **pnpm or Yarn**
+project with `init --workflow`, run it again (after deleting the old workflow)
+or copy the new install steps: the old ones stop working on 28 October 2026.
+
+### Fixed
+
+- **Generated pnpm and Yarn workflows break on Node 26.** They ran
+  `corepack enable` with Node `lts/*`, which becomes Node 26 on 28 October, and
+  Node 25 and later no longer include Corepack. The workflow now installs
+  Corepack from npm first. Yarn 2 and later get `--immutable --mode=skip-build`,
+  since they have no `--ignore-scripts`; Yarn 1 gets `--frozen-lockfile`.
+- **The first pull request after `init --workflow` failed.** `init` wrote the
+  lock before the workflow, so the lock didn't record the workflow's
+  permissions. It now writes the workflow first.
+- **`init` replaced an existing lock**, approving whatever had changed without
+  showing it. It now keeps the lock, like the config, and says to run
+  `permlang lock` and review the change.
+- **The generated workflow in a monorepo package** went in the package's own
+  `.github` folder, which GitHub ignores. It now goes in the repository's
+  `.github/workflows`, named after the package, with `working-directory` set.
+- **Paths in the generated workflow**: Windows-style paths are written with
+  forward slashes, and a path with a space (which the Action can't pass) is
+  refused with a suggestion, before anything is written.
+
+### Changed
+
+- The generated workflow also runs in merge queues, and on pushes to the
+  repository's default branch instead of always `main`.
+
 ## 0.3.2 (2026-10-05)
 
 ### Fixed

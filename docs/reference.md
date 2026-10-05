@@ -44,7 +44,7 @@ it can't see yet. New here? Start with [getting started](getting-started.md).
     `Sync` forms).
   - `net`: also `http`, `https`, `http2`, `net`, and `tls` (host from a URL or
     from an options object's `hostname` / `host`).
-  - `db`: **Prisma** (open question 2, provisionally answered). The table is the
+  - `db`: **Prisma**. The table is the
     model's accessor name: `prisma.lead.create()` needs `db.write(lead)`. Raw
     SQL (`$queryRaw`, `$executeRaw`, ...) needs bare `db.read` and `db.write`.
   - `db`: **Drizzle**. The table is the name given to `pgTable` / `mysqlTable` /
@@ -112,8 +112,7 @@ it can't see yet. New here? Start with [getting started](getting-started.md).
 
 ### Known limits
 
-Design doc §12 asks the checker to catch the whole adversarial suite, or to
-document each miss. These misses are documented as fixtures in
+The aim is to catch the whole adversarial suite, or to document each miss. These misses are documented as fixtures in
 [`fixtures/m4/limits/`](../fixtures/m4/limits) and [`fixtures/m6/limits/`](../fixtures/m6/limits),
 and as "known misses" in the adversarial suite
 ([`test/adversarial.test.ts`](../test/adversarial.test.ts)), which also lists
@@ -208,8 +207,7 @@ Sketch strictness reports everything but fails only on `PERM005`.
 Wildcards (`*`) are not allowed. A capability without an argument (`net`,
 `fs.read`) allows any scope. It is required when the host or path can't be
 determined statically, for example `fetch(url)` or a template path like
-`` `./data/${name}` ``. *(Provisional: this answers open question 1 in the design
-doc and may change after review.)*
+`` `./data/${name}` ``.
 
 ## Data-flow rules
 
@@ -452,6 +450,26 @@ check reports `PERM007` warnings instead of what the code does.
 your lockfile. Install scripts aren't needed for types; if you generate code,
 such as with `prisma generate`, run that too.
 
+What `init --workflow` writes:
+
+- **pnpm and Yarn** come through Corepack, which the workflow installs from npm
+  first (`npm install --global corepack@latest`), since Node 25 and later no
+  longer include it. Yarn 2 and later (a `.yarnrc.yml`, or a Yarn 2 lockfile)
+  install with `--immutable --mode=skip-build`; Yarn 1 with
+  `--frozen-lockfile --ignore-scripts`.
+- **Triggers**: pull requests, merge queues (`merge_group`), and pushes to the
+  repository's default branch (from `origin`'s HEAD, else `main`).
+- **In a monorepo package**, run `init` in the package: the workflow goes in
+  the repository's `.github/workflows/`, named after the package
+  (`permlang-packages-api.yml`), with `working-directory` set to it.
+  Dependencies install at the repository root, where the lockfile is.
+- **Paths** are written with forward slashes. A path with a space can't be
+  passed in the Action's `args`, so `init` refuses it; list such files in a
+  `tsconfig.json` and use `--project`.
+
+`init` keeps an existing config, workflow, or lock. It writes the workflow
+before the lock, so the lock records it and the first pull request passes.
+
 The Action runs `permlang check`, fails the build on errors, and posts the
 permission diff as a pull-request comment, updating it on later pushes. Each
 problem also appears as an annotation on its line in the pull request's
@@ -462,8 +480,10 @@ comment. This repository runs it on itself (see
 
 `@v0` follows the latest 0.x release. A minor release (0.2, 0.3, ...) can
 detect more and fail builds that passed before; the [changelog](../CHANGELOG.md)
-says when. To upgrade on your own schedule, pin an exact release instead, such
-as `PermLang/permlang@v0.2.0`.
+says when. To upgrade on your own schedule, pin an exact release instead. The
+safest pin is the release's commit, since a tag can be moved
+(`PermLang/permlang@<commit-sha> # v0.3.3`); Dependabot keeps such pins up to
+date. See the [releases](https://github.com/PermLang/PermLang/releases).
 
 **Code scanning.** Set `sarif: true` to also upload the findings to GitHub code
 scanning, where they appear in the repository's **Security** tab next to
@@ -505,7 +525,7 @@ npm run permlang -- check src --github-annotations # also print GitHub Actions a
 npm run permlang -- check src --sarif out.sarif    # also write the findings as SARIF, for code scanning
 npm run permlang -- lock src                       # write permlang.lock.json
 npm run permlang -- diff origin/main               # permission changes since main
-npm run permlang -- spec src                       # check .perm specs against the code
+npm run permlang -- spec src --spec x.perm        # check a .perm spec against the code
 npm run permlang -- --version                      # the installed version
 npm run permlang -- check --help                   # usage (any command)
 ```
@@ -535,7 +555,7 @@ See [docs/spec-format.md](spec-format.md).
 ## Real-world trial
 
 [docs/trial-2026-09.md](trial-2026-09.md): PermLang on Umami (1,372 files, 22 s)
-and Ghostfolio's API (524 files, 9 s). It found and fixed three false-positive
+and Ghostfolio's API (524 files, 9 s). It found and fixed four false-positive
 classes and one false-negative class (Prisma clients built with `$extends`),
 found no false positives in a spot check of its network, process, and file-write
 findings, and identified the main remaining false negative: SDKs without
@@ -544,7 +564,7 @@ invisible.
 
 ## Development
 
-Tests come first. Each rule in the design doc gets passing and failing fixtures
+Tests come first. Each detection rule gets passing and failing fixtures
 under `fixtures/`. A fixture marks each line that must produce a diagnostic:
 
 ```ts

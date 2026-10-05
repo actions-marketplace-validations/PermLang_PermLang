@@ -11,12 +11,22 @@ The npm package is `permlang`, owned by the npm user `parkweb`, with the
 2. On GitHub, create a release with the tag `v<version>`, including the `v`
    (for example `v0.2.3`), on `main`.
 
-The [release workflow](../.github/workflows/release.yml) checks that the tag
-matches `package.json`, runs the tests, and packs the package. It signs a build
-provenance attestation for that tarball, publishes the same tarball to npm with
-provenance, attaches it and the attestation to the GitHub release, and moves
-the `v0` tag. A new version can take a few minutes to download from npm after
-the workflow finishes.
+The [release workflow](../.github/workflows/release.yml) runs in two jobs:
+
+1. **Build**, with read-only access: checks that the tag matches
+   `package.json` and that the release commit is on `main`, installs the
+   dependencies, runs the tests, and packs the package.
+2. **Publish**, which installs nothing, so no dependency's code ever runs with
+   the right to publish: signs a build provenance attestation for that tarball,
+   publishes the same tarball to npm with provenance, attaches it and the
+   attestation to the GitHub release, and moves the `v0` tag.
+
+Releases run one at a time. Re-running a release is safe: a version already on
+npm is skipped, and `v0` only moves for the newest release, so re-running an
+older one can't move it back. A pre-release (a version such as `0.4.0-rc.1`,
+with the release marked as a pre-release on GitHub) is published under npm's
+`next` tag and leaves `v0` alone. A new version can take a few minutes to
+download from npm after the workflow finishes.
 
 The attached files are what OpenSSF Scorecard's Signed-Releases check looks
 for, so don't remove them from a release.
@@ -36,7 +46,7 @@ before:
 
 npm users on `^0.2.0` only get patches. Action users on `@v0` get every 0.x
 release, minors included, because the workflow moves `v0` each time. The
-reference tells users to pin an exact tag (`@v0.2.0`) if they don't want that.
+reference tells users to pin an exact release if they don't want that.
 
 ## One-time setup (done for 0.1.0, 2026-10-01)
 

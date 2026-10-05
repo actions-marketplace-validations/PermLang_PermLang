@@ -17,7 +17,8 @@ We aim to reply to every issue and pull request within a week.
 
 ## Setting up
 
-You need Node 20 or later.
+You need Node 22 or later to run the tests. (PermLang itself runs on Node 20.1
+or later.)
 
 ```bash
 git clone https://github.com/PermLang/PermLang && cd PermLang
