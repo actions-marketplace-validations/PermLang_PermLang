@@ -19,6 +19,7 @@ import { UNVERIFIABLE, formatCapability } from "./capability.js";
 import { literalString, resolveAlias, resolvedDeclaration, unwrapExpression } from "./detect/shared.js";
 import type { Edge, Reach } from "./graph.js";
 import { constructorUnitNode, enclosingUnitNode, isInNodeModules, unitNodeForDeclaration, unitNodesForSymbol, type Unit } from "./units.js";
+import { forEachDescendant } from "./walk.js";
 
 export interface ToolRegistration {
   /** The tool's name as the model sees it, or `*` for a handler that serves every tool. */
@@ -68,7 +69,8 @@ const HOSTED_TOOL = /^(Hosted\w*Tool|ProviderExecutedTool)$/;
 
 export function findTools(sourceFile: SourceFile): ToolRegistration[] {
   const out: ToolRegistration[] = [];
-  sourceFile.forEachDescendant((node) => {
+  // The iterative walk, so very deeply nested code can't overflow the stack.
+  forEachDescendant(sourceFile, (node) => {
     if (Node.isCallExpression(node) || Node.isNewExpression(node)) out.push(...registrationsAt(node));
   });
   return out;

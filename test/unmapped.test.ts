@@ -68,6 +68,10 @@ describe("imports whose types can't be found", () => {
     expect(more.unresolved).toEqual(["shimmed-package", "untyped-dynamic", "untyped-require"]);
   });
 
+  it("doesn't mistake a script for an asset because of its query or fragment", () => {
+    expect(checkFiles([path.join(dir, "assets.ts")], {}).unresolved).toEqual(["./evil.js#.css", "./evil.js?x=.css"]);
+  });
+
   it("follows the unmapped policy", () => {
     expect(report({ unmapped: "error" }).diagnostics.filter((x) => x.code === "PERM007").every((x) => x.severity === "error")).toBe(true);
     expect(report({ unmapped: "trust" }).diagnostics.filter((x) => x.code === "PERM007")).toEqual([]);

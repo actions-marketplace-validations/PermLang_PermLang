@@ -1044,20 +1044,22 @@ describe("project configuration in the check", () => {
     ]);
   });
 
-  it("only warns when the lock predates configuration, so upgrading doesn't fail the build", () => {
-    const old = { permlang: 1 as const, functions: {}, unsafe: {} };
-    const report = checkFiles(code(), { projectRoot: dir, lock: { file: lockFile(), contents: old } });
+  // A lock with no configuration entries used to count as written before 0.3, and only warned. A
+  // pull request could delete the entries to get the same (found in the code review, G4).
+  it("fails on configuration the lock doesn't record, however the lock was written", () => {
+    const empty = { permlang: 2 as const, functions: {}, unsafe: {} };
+    const report = checkFiles(code(), { projectRoot: dir, lock: { file: lockFile(), contents: empty } });
     const drift = report.diagnostics.filter((d) => d.code === "PERM005");
     expect(drift.length).toBeGreaterThan(5);
-    expect(drift.every((d) => d.severity === "warning" && d.message.includes("doesn't record project configuration yet"))).toBe(true);
+    expect(drift.every((d) => d.severity === "error" && d.message.endsWith("which permlang.lock.json doesn't record."))).toBe(true);
   });
 
-  it("says a file no longer grants what the lock records", () => {
+  it("fails when a file no longer grants what the lock records, so the lock can't approve it in advance", () => {
     const lock = recorded();
     lock.functions["action.yml#<action.yml>"]!.push("ci.secret(OLD_TOKEN)");
     const report = checkFiles(code(), { projectRoot: dir, lock: { file: lockFile(), contents: lock } });
     expect(report.diagnostics.filter((d) => d.code === "PERM005").map((d) => `${d.severity} ${d.message}`)).toEqual([
-      "warning action.yml no longer grants ci.secret(OLD_TOKEN), but permlang.lock.json still records it.",
+      "error action.yml no longer grants ci.secret(OLD_TOKEN), but permlang.lock.json still records it.",
     ]);
   });
 

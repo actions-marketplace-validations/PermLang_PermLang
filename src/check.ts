@@ -5,19 +5,26 @@
 // its file's @module @perm tags.
 
 import path from "node:path";
-import { Node, Project, ts } from "ts-morph";
+import { Node, ts, type Project, type SourceFile } from "ts-morph";
 import { AdapterError, AdapterIndex, loadAdapters } from "./adapters.js";
 import { UNVERIFIABLE, covers, formatCapability } from "./capability.js";
 import { detectInFile } from "./detect/index.js";
+import { isPrismaClientApi } from "./detect/prisma.js";
 import { Hierarchy } from "./dispatch.js";
 import { buildLock, lockDrift, type LockFile } from "./lock.js";
+import { moduleComments, strayPermTags, type AnnotationError } from "./annotations.js";
 import { projectFiles } from "./project-files.js";
 import { findTools, handlerReach } from "./tools.js";
 import { flowDiagnostics, type FlowRule } from "./flows.js";
+import { failureReason, projectOfFiles, projectOfTsConfig, unparsedReason } from "./load.js";
+import { clearResolutionCache, resolveAlias } from "./detect/shared.js";
 import { unmappedPackages, unresolvedImports, type UnmappedPackage } from "./unmapped.js";
 import { unseenFrom } from "./unseen.js";
-import { collectEdges, pathTo, propagate, type Edge, type Reach } from "./graph.js";
+import { forEachDescendant, lineAndColumn } from "./walk.js";
+import { collectEdges, holderOf, pathTo, propagate, type Edge, type GraphContext, type Reach } from "./graph.js";
 import {
+  annotationComments,
+  createDeclaredUnit,
   createUnit,
   declaredCapabilities,
   enclosingUnitNode,
@@ -25,7 +32,9 @@ import {
   isAnnotated,
   isInNodeModules,
   isUnitNode,
+  ownDeclarationFiles,
   readModuleAnnotation,
+  unitNodeForDeclaration,
   type Unit,
   type Use,
 } from "./units.js";
@@ -180,14 +189,12 @@ const DEFAULT_COMPILER_OPTIONS: ts.CompilerOptions = {
 
 /** @perm fs.read */
 export function checkFiles(files: readonly string[], options: CheckOptions = {}): Report {
-  const project = new Project({ compilerOptions: DEFAULT_COMPILER_OPTIONS });
-  project.addSourceFilesAtPaths([...files]);
-  return checkProject(project, options);
+  return checkProject(projectOfFiles(files, DEFAULT_COMPILER_OPTIONS), options);
 }
 
 /** @perm fs.read */
 export function checkTsConfig(tsConfigFilePath: string, options: CheckOptions = {}): Report {
-  return checkProject(new Project({ tsConfigFilePath }), options);
+  return checkProject(projectOfTsConfig(tsConfigFilePath), options);
 }
 
 /**
@@ -195,6 +202,7 @@ export function checkTsConfig(tsConfigFilePath: string, options: CheckOptions = 
  * @perm fs.read
  */
 export function checkProject(project: Project, options: CheckOptions = {}): Report {
+  clearResolutionCache();
   const loaded = loadAdapters(options.adapters ?? []);
   if (loaded.errors.length > 0) throw new AdapterError(loaded.errors);
   const adapters = new AdapterIndex(loaded.adapters);
@@ -204,29 +212,52 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
   const units = new Map<Node, Unit>();
   const diagnostics: Diagnostic[] = [];
 
+  // A file that can't be parsed or analyzed (nested too deeply, say) is unverifiable, as a
+  // whole: its top-level code stands for it. The rest of the project is checked as usual.
+  const unanalyzable = (sourceFile: SourceFile, reason: string) => {
+    const unit = units.get(sourceFile) ?? createUnit(sourceFile, undefined, new Set(), adapters.vocabulary);
+    unit.uses.push({ verb: "uses", capability: { name: UNVERIFIABLE }, call: `code that couldn't be analyzed (${reason})`, line: 1, column: 1 });
+    units.set(sourceFile, unit);
+    unanalyzed.add(unit);
+  };
+
   // 1. Every unit in every file, with its annotations and direct uses.
   for (const sourceFile of sourceFiles) {
-    const module = readModuleAnnotation(sourceFile, adapters.vocabulary);
-    const exports = exportedDeclarations(sourceFile);
-    const add = (node: Node) => units.set(node, createUnit(node, module, exports, adapters.vocabulary));
-
-    add(sourceFile);
-    sourceFile.forEachDescendant((node) => {
-      if (isUnitNode(node)) add(node);
+    const reason = unparsedReason(sourceFile) ?? attempt(() => {
+      const found = analyzeFile(sourceFile, adapters);
+      for (const [node, unit] of found.units) units.set(node, unit);
+      diagnostics.push(...found.diagnostics);
     });
-    for (const e of module?.errors ?? []) diagnostics.push(annotationError(sourceFile.getFilePath(), "<module>", e));
-
-    for (const { node, uses } of detectInFile(sourceFile, adapters)) {
-      const unit = units.get(enclosingUnitNode(node))!;
-      const { line, column } = sourceFile.getLineAndColumnAtPos(node.getStart());
-      for (const u of uses) unit.uses.push({ ...u, line, column });
-    }
+    if (reason !== undefined) unanalyzable(sourceFile, reason);
   }
 
-  // 2. Edges between units, then what each unit can reach.
-  const context = { unitOf: (node: Node) => units.get(node), hierarchy: new Hierarchy(sourceFiles), adapters };
-  const edges = sourceFiles.flatMap((sf) => collectEdges(sf, context));
-  const reach = propagate(units.values(), edges);
+  // 2. Edges between units, then what each unit can reach. JavaScript the project declares
+  //    in its own .d.ts files gets a unit when something calls into it; it's unverifiable.
+  //    (Importing it isn't reported: there would be no way to accept that import.)
+  const exported = groupBy([...units.values()].filter((u) => u.exported), (u) => u.node.getSourceFile());
+  const declared = new Map<Node, Unit>();
+  const isOwnDeclarationFile = ownDeclarationFiles(sourceFiles);
+  const declaredUnit = (node: Node): Unit | undefined => {
+    if (Node.isSourceFile(node) || !node.getSourceFile().isDeclarationFile() || !isOwnDeclarationFile(node.getSourceFile())) return undefined;
+    if (unitNodeForDeclaration(node) !== node) return undefined; // not a value the project declares (an ambient package, a type)
+    if (isPrismaClientApi(node)) return undefined; // a generated Prisma client, which the Prisma detector reads
+    if (!declared.has(node)) declared.set(node, createDeclaredUnit(node));
+    return declared.get(node);
+  };
+  const context: GraphContext = {
+    unitOf: (node: Node) => units.get(node) ?? declaredUnit(node),
+    // Every analyzed file has one: its top-level code.
+    exportedUnits: (file) => exported.get(file)!,
+    hierarchy: new Hierarchy(sourceFiles),
+    adapters,
+  };
+  const edges = sourceFiles.flatMap((sf) => {
+    let found: Edge[] = [];
+    const reason = unanalyzed.has(units.get(sf)!) ? undefined : attempt(() => (found = collectEdges(sf, context)));
+    if (reason !== undefined) unanalyzable(sf, reason);
+    return found;
+  });
+  const reach = propagate([...units.values(), ...declared.values()], edges);
   const edgesFrom = groupBy(edges, (e) => e.from);
 
   // 3. Compare declared with actual.
@@ -257,7 +288,7 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
         code: "PERM006",
         file: u.file,
         line: u.line,
-        column: u.node.getSourceFile().getLineAndColumnAtPos(u.node.getStart()).column,
+        column: lineAndColumn(u.node.getSourceFile(), u.node.getStart()).column,
         function: unit.name,
         capability: u.package,
         call: "",
@@ -350,6 +381,50 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
   return report;
 }
 
+// Files that couldn't be analyzed, by their top-level unit.
+const unanalyzed = new WeakSet<Unit>();
+
+/** Runs `work`; if it throws, the reason, for a message. */
+function attempt(work: () => void): string | undefined {
+  try {
+    work();
+    return undefined;
+  } catch (error) {
+    return failureReason(error);
+  }
+}
+
+/** One file's units, their annotations and direct uses, and the file's annotation errors. */
+function analyzeFile(sourceFile: SourceFile, adapters: AdapterIndex): { units: Map<Node, Unit>; diagnostics: Diagnostic[] } {
+  const units = new Map<Node, Unit>();
+  const diagnostics: Diagnostic[] = [];
+  const module = readModuleAnnotation(sourceFile, adapters.vocabulary);
+  const exports = exportedDeclarations(sourceFile);
+  // Every comment an annotation is read from; any other @perm attaches to nothing.
+  const consumed = new Set(moduleComments(sourceFile).map((c) => c.start));
+  const add = (node: Node) => {
+    const comments = annotationComments(node);
+    units.set(node, createUnit(node, module, exports, adapters.vocabulary, comments));
+    for (const c of comments) consumed.add(c.start);
+  };
+
+  add(sourceFile);
+  forEachDescendant(sourceFile, (node) => {
+    if (isUnitNode(node)) add(node);
+  });
+  for (const e of module?.errors ?? []) diagnostics.push(annotationError(sourceFile.getFilePath(), "<module>", e));
+  for (const { error, node } of strayPermTags(sourceFile, consumed)) {
+    diagnostics.push(strayAnnotation(sourceFile.getFilePath(), units.get(enclosingUnitNode(node))!.name, error));
+  }
+
+  for (const { node, uses } of detectInFile(sourceFile, adapters)) {
+    const unit = units.get(enclosingUnitNode(node))!;
+    const { line, column } = lineAndColumn(sourceFile, node.getStart());
+    for (const u of uses) unit.uses.push({ ...u, line, column });
+  }
+  return { units, diagnostics };
+}
+
 // --- tools -------------------------------------------------------------------
 
 /**
@@ -411,7 +486,7 @@ function diagnose(unit: Unit, edges: readonly Edge[], reach: Reach, strictness: 
   const declared = declaredCapabilities(unit);
   for (const use of unit.uses) {
     if (covers(declared, use.capability)) continue;
-    out.push(violation(unit, use, use.verb, formatCapability(use.capability), [], use.capability.dynamic === true));
+    out.push(violation(unit, use, use.verb, formatCapability(use.capability), [], use.capability.dynamic === true, unit));
   }
   for (const edge of edges) {
     if (edge.to === unit) continue; // recursion into itself adds nothing new
@@ -419,7 +494,7 @@ function diagnose(unit: Unit, edges: readonly Edge[], reach: Reach, strictness: 
       if (covers(declared, p.capability)) continue;
       if (key === UNVERIFIABLE && edge.to.own?.unsafe) continue; // vouched for by @perm-unsafe
       const path = [edge.to.name, ...pathTo(reach, edge.to, key)];
-      out.push(violation(unit, edge, "calls", key, path, p.capability.dynamic === true));
+      out.push(violation(unit, edge, "calls", key, path, p.capability.dynamic === true, holderOf(reach, edge.to, key)));
     }
   }
   return out;
@@ -441,9 +516,10 @@ function violation(
   capability: string,
   path: string[],
   dynamic: boolean,
+  holder: Unit,
 ): Diagnostic {
   const via = path.length > 0 ? `, reaching ${path.join(" → ")}` : "";
-  if (capability === UNVERIFIABLE) return unverifiable(unit, site, verb, path, "error");
+  if (capability === UNVERIFIABLE) return unverifiable(unit, site, verb, path, holder);
   const reason = dynamic
     ? `its ${scopeWord(capability)} can't be determined statically, so it needs ${capability}`
     : `its declared permissions do not include ${capability}`;
@@ -462,11 +538,11 @@ function violation(
   };
 }
 
-/** Code whose effects can't be known. Only @perm-unsafe accepts it. */
-function unverifiable(unit: Unit, site: Use | Edge, verb: string, path: string[], severity: Severity): Diagnostic {
+/** Code whose effects can't be known, used in `holder`'s own code. Only @perm-unsafe accepts it. */
+function unverifiable(unit: Unit, site: Use | Edge, verb: string, path: string[], holder: Unit): Diagnostic {
   const via = path.length > 0 ? `, reaching ${path.join(" → ")}` : "";
   return {
-    severity,
+    severity: "error",
     code: "PERM004",
     file: unit.file,
     line: site.line,
@@ -477,8 +553,23 @@ function unverifiable(unit: Unit, site: Use | Edge, verb: string, path: string[]
     ...(path.length > 0 ? { path } : {}),
     message: `${unit.name} ${verb} ${site.call}${via}
   which can't be verified statically.`,
-    fix: `rewrite it so what it calls is known statically, or mark ${path.length > 0 ? "the function that does it" : unit.name} @perm-unsafe with a reason.`,
+    fix: unverifiableFix(unit, holder),
   };
+}
+
+/**
+ * How to resolve unverifiable code, naming something that can carry @perm-unsafe: never a
+ * file's top-level code (a @module comment can't), and never a .d.ts declaration.
+ */
+function unverifiableFix(unit: Unit, holder: Unit): string {
+  if (unanalyzed.has(holder)) return "simplify the file so PermLang can analyze it (split up its most deeply nested code, if that's the reason).";
+  if (holder.declarationOnly) {
+    const js = path.basename(holder.file).replace(/.d.([cm]?)ts$/, ".$1js");
+    const who = Node.isSourceFile(unit.node) ? "a function that wraps the call" : unit.name;
+    return `convert ${js} to TypeScript so PermLang can check it, or review it and mark ${who} @perm-unsafe with a reason.`;
+  }
+  if (Node.isSourceFile(holder.node)) return "rewrite it so what it calls is known statically, or move it into a function marked @perm-unsafe with a reason.";
+  return `rewrite it so what it calls is known statically, or mark ${holder.name} @perm-unsafe with a reason.`;
 }
 
 /** One error per capability an unannotated unit reaches, at the first place it does. */
@@ -486,7 +577,7 @@ function missingAnnotation(unit: Unit, reach: Reach): Diagnostic[] {
   return [...reach.get(unit)!].map(([key, p]) => {
     const site = p.edge ?? p.use;
     const path = p.edge ? [p.edge.to.name, ...pathTo(reach, p.edge.to, key)] : [];
-    if (key === UNVERIFIABLE) return unverifiable(unit, site, p.edge ? "calls" : p.use.verb, path, "error");
+    if (key === UNVERIFIABLE) return unverifiable(unit, site, p.edge ? "calls" : p.use.verb, path, holderOf(reach, unit, key));
     const via = path.length > 0 ? `, reaching ${path.join(" → ")},` : "";
     return {
       severity: "error",
@@ -499,9 +590,38 @@ function missingAnnotation(unit: Unit, reach: Reach): Diagnostic[] {
       call: site.call,
       ...(path.length > 0 ? { path } : {}),
       message: `${unit.name} ${p.edge ? "calls" : p.use.verb} ${site.call}${via} but has no @perm annotation.`,
-      fix: `add /** @perm ${key} */ to ${unit.name}.`,
+      fix: annotationFix(unit, key),
     } satisfies Diagnostic;
   });
+}
+
+/** Where to declare `key`, at a place an annotation attaches to. */
+function annotationFix(unit: Unit, key: string): string {
+  if (Node.isSourceFile(unit.node)) return `add /** @module @perm ${key} */ at the top of the file.`;
+  const cls = unit.node;
+  if (Node.isClassDeclaration(cls) || Node.isClassExpression(cls)) {
+    // A class without a constructor: its @perm applies to the implicit one.
+    const holder = cls.getParent();
+    const named = cls.getName() ?? (holder && Node.isVariableDeclaration(holder) ? holder.getName() : undefined);
+    return named ? `add /** @perm ${key} */ above class ${named}.` : `add a constructor to the class, with /** @perm ${key} */.`;
+  }
+  return `add /** @perm ${key} */ to ${unit.name}.`;
+}
+
+/** An @perm or @perm-unsafe tag that no function or file takes, so nothing checks it. */
+function strayAnnotation(file: string, name: string, e: AnnotationError): Diagnostic {
+  return {
+    severity: "error",
+    code: "PERM002",
+    file,
+    line: e.line,
+    column: e.column,
+    function: name,
+    capability: e.text,
+    call: "",
+    message: `this ${e.text} isn't on a function, so it applies to nothing and nothing checks it.`,
+    fix: "put it on a function, method, constructor, or accessor (or a class without a constructor), or cover the whole file with /** @module @perm ... */.",
+  };
 }
 
 function annotationError(file: string, name: string, e: { text: string; reason: string; line: number; column: number }): Diagnostic {
@@ -533,6 +653,10 @@ function dedupe(diagnostics: Diagnostic[]): Diagnostic[] {
 
 function groupBy<T, K>(items: readonly T[], key: (item: T) => K): Map<K, T[]> {
   const out = new Map<K, T[]>();
-  for (const item of items) out.set(key(item), [...(out.get(key(item)) ?? []), item]);
+  for (const item of items) {
+    const group = out.get(key(item));
+    if (group) group.push(item);
+    else out.set(key(item), [item]);
+  }
   return out;
 }

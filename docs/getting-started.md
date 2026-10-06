@@ -35,7 +35,7 @@ This writes three files. Commit all of them:
 | File | What it is |
 | --- | --- |
 | `permlang.config.json` | Settings. Starts at `"strictness": "sketch"`: everything is reported, and only new access the lock doesn't record fails (plus any flow rules, or `"error"` policies, you add later). |
-| `permlang.lock.json` | What every function can reach today (network hosts, files, database tables, environment variables, processes), and what your workflows and `package.json` scripts grant (token permissions, secrets, Actions, install hooks). |
+| `permlang.lock.json` | What every function can reach today (network hosts, files, database tables, environment variables, processes), and what your workflows and `package.json` scripts grant (token permissions, secrets, Actions, install hooks). It also records which files were checked (`src` here), and the settings. |
 | `.github/workflows/permlang.yml` | Installs your dependencies (for their types), then runs PermLang on every pull request and comments the permission diff. |
 
 ## 3. Review what you have
@@ -52,10 +52,11 @@ Look at four things:
   team adapter file, listed under `"adapters"` in `permlang.config.json`, does
   either.
 - **Unverifiable code** (PERM004): `eval`, `new Function`, computed calls on
-  `fs` or `globalThis`, `require` of a computed path. It's reported on the
-  exported function that reaches it, and the lock records every use. Rewrite
-  it, or mark the function `@perm-unsafe reason:"..."`. Every override is
-  listed in every report.
+  `fs` or `globalThis`, `require` of a computed path or of `child_process`,
+  `data:` imports, calls into your own JavaScript through a hand-written `.d.ts`.
+  It's reported on the exported function that reaches it, and the lock records
+  every use. Rewrite it, or mark the function `@perm-unsafe reason:"..."`. Every
+  override is listed in every report.
 - **Tools an AI model can call** (if you use MCP, the Vercel AI SDK, OpenAI
   Agents, or LangChain). The report lists each tool and what it can reach. A
   tool that can run commands, write data, or send to any address gets a warning
@@ -73,14 +74,24 @@ src/leads.ts:5:9 error PERM005: handleLead can now reach net(api.data-broker.io)
   -> run `permlang lock` and commit the change so reviewers see it.
 ```
 
-If the access is intended, run `npx permlang lock` and commit the lock change.
+If the access is intended, run `npx permlang lock src` and commit the lock change.
 Reviewers see it in the pull request, and the Action's comment shows where the
 new access happens and which functions can now reach it. Until the lock change is
 committed, the comment is marked **Not approved yet**, matching the failing check:
 
 ```bash
-npx permlang diff origin/main
+npx permlang diff origin/main src
 ```
+
+The lock has to match the code exactly, so the check also fails when the lock
+records access the code no longer reaches (otherwise a change could approve
+access in advance by editing only the lock), when a `@perm-unsafe` override is
+added, removed, or reworded, and when the lock file is deleted. `permlang lock`
+fixes each of these, and the lock's diff shows what changed.
+
+Run `permlang check` and `permlang lock` with the same paths and options as your
+workflow (`src` here): the lock records them, and a check of other files, or with
+other settings, fails with one error that says what differs.
 
 ## 5. Enforce, when you're ready
 
@@ -101,10 +112,13 @@ A whole file can share one declaration:
  */
 ```
 
+(or, on one line, `/** @module @perm net(api.stripe.com) */`).
+
 Then raise `"strictness"` in `permlang.config.json`:
 
 - `development`: annotated functions can't exceed their `@perm`, and exported
-  functions must declare what they reach.
+  functions and entry points (route tables, plugin hooks, tool definitions) must
+  declare what they reach.
 - `production`: every function must be covered, private helpers included.
 
 Set `"unmapped": "error"` to require every package to be mapped or declared pure,
@@ -117,7 +131,11 @@ the Stripe key reach a server other than Stripe's:
 { "flows": [{ "from": "env(STRIPE_KEY)", "to": ["net(api.stripe.com)"] }] }
 ```
 
-Every setting is listed in the [reference](reference.md#configuration).
+Settings are recorded in the lock, so loosening one shows up in review like new
+access does. After changing `permlang.config.json`, run `npx permlang lock src`
+and commit both files; the pull request's comment lists the change under
+**Check settings changed**. Every setting is listed in the
+[reference](reference.md#configuration).
 
 ## 6. Show it (optional)
 

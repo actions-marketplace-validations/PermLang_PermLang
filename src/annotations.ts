@@ -4,8 +4,9 @@
 // parser, so tags like `@perm-unsafe` or `@permissions` are never mistaken for
 // `@perm`, and every entry keeps an exact source position.
 
-import { ts, type JSDoc, type SourceFile } from "ts-morph";
+import { ts, type Node, type SourceFile } from "ts-morph";
 import { parsePermList, type Capability } from "./capability.js";
+import { forEachDescendant, lineAndColumn } from "./walk.js";
 
 export interface AnnotationError {
   text: string;
@@ -41,8 +42,9 @@ const NEXT_TAG = /\s@[A-Za-z]/;
 const CONTINUATION = /\n[ \t]*\*(?!\/)/g;
 // Standard JSDoc markers for a file-level comment.
 const MODULE_TAG = /@(?:module|file|fileoverview)(?![\w-])/g;
-// A block tag starts a line: nothing before it but the comment opener or leading `*`.
-const LINE_START = /(?:^|\n)[ \t]*(?:\/\*\*)?[ \t]*\*?[ \t]*$/;
+// A block tag starts a line: nothing before it but the comment opener or leading `*`,
+// or a bare file-level marker, as in the one-line `/** @module @perm net */`.
+const LINE_START = /(?:^|\n)[ \t]*(?:\/\*\*)?[ \t]*\*?[ \t]*(?:@(?:module|file|fileoverview)[ \t]+)*$/;
 
 /** Matches of `tag` that begin a line, so prose that mentions a tag (a `@perm` tag) is ignored. */
 function blockTags(text: string, tag: RegExp): RegExpExecArray[] {
@@ -54,8 +56,14 @@ export function isModuleComment(text: string): boolean {
 }
 
 /** A function's own JSDoc comments, excluding a module comment that happens to sit above it. */
-export function functionComments(docs: readonly JSDoc[]): Comment[] {
-  return docs.map((d) => ({ text: d.getText(), start: d.getStart() })).filter((c) => !isModuleComment(c.text));
+export function functionComments(docs: readonly Comment[]): Comment[] {
+  return docs.filter((c) => !isModuleComment(c.text));
+}
+
+/** The JSDoc comments TypeScript attaches to a node (any kind of node, not only those ts-morph calls JSDocable). */
+export function jsDocComments(node: { compilerNode: ts.Node; getSourceFile(): SourceFile }): Comment[] {
+  const sf = node.getSourceFile().compilerNode;
+  return ((node.compilerNode as { jsDoc?: ts.JSDoc[] }).jsDoc ?? []).map((d) => ({ text: d.getText(sf), start: d.getStart(sf) }));
 }
 
 /** Every `@module` comment before a top-level statement (or at the end of the file). */
@@ -89,7 +97,7 @@ export function readPermAnnotation(
   const capabilities: Capability[] = [];
   const errors: AnnotationError[] = [];
   let unsafe: UnsafeOverride | undefined;
-  const at = (pos: number) => sourceFile.getLineAndColumnAtPos(pos);
+  const at = (pos: number) => lineAndColumn(sourceFile, pos);
 
   for (const { text, start } of comments) {
     for (const tag of blockTags(text, PERM_TAG)) {
@@ -121,6 +129,30 @@ export function readPermAnnotation(
   }
 
   return found ? { capabilities, errors, ...(unsafe ? { unsafe } : {}) } : undefined;
+}
+
+/**
+ * `@perm` and `@perm-unsafe` tags in JSDoc comments that no function or file took, so
+ * nothing checks them: on an interface member, a variable that isn't a function, a class
+ * with a constructor, a statement. `consumed` holds the start of every comment that was read.
+ */
+export function strayPermTags(sourceFile: SourceFile, consumed: ReadonlySet<number>): { error: AnnotationError; node: Node }[] {
+  const out: { error: AnnotationError; node: Node }[] = [];
+  const seen = new Set<number>();
+  forEachDescendant(sourceFile, (node) => {
+    for (const doc of (node.compilerNode as { jsDoc?: ts.JSDoc[] }).jsDoc ?? []) {
+      const start = doc.getStart(sourceFile.compilerNode);
+      if (consumed.has(start) || seen.has(start)) continue;
+      seen.add(start);
+      const text = doc.getText(sourceFile.compilerNode);
+      for (const [tag, pattern] of [["@perm", PERM_TAG], ["@perm-unsafe", UNSAFE_TAG]] as const) {
+        for (const m of blockTags(text, pattern)) {
+          out.push({ error: { text: tag, reason: "it applies to nothing", ...lineAndColumn(sourceFile, start + m.index) }, node });
+        }
+      }
+    }
+  });
+  return out;
 }
 
 /** The text of one tag: up to the next tag or the end of the comment. */

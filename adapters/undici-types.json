@@ -1,0 +1,19 @@
+{
+  "permlang": 1,
+  "package": "undici-types",
+  "default": [],
+  "functions": {
+    "fetch": ["net({host:0})"],
+    "request": ["net({host:0})"],
+    "stream": ["net({host:0})"],
+    "pipeline": ["net({host:0})"],
+    "connect": ["net({host:0})"],
+    "upgrade": ["net({host:0})"],
+    "Dispatcher.dispatch": ["net"],
+    "Dispatcher.request": ["net"],
+    "Dispatcher.stream": ["net"],
+    "Dispatcher.pipeline": ["net"],
+    "Dispatcher.connect": ["net"],
+    "Dispatcher.upgrade": ["net"]
+  }
+}

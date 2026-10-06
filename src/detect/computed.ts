@@ -9,8 +9,8 @@
 
 import { Node, SyntaxKind, type ElementAccessExpression, type ObjectLiteralExpression, type Symbol as MorphSymbol, type Type } from "ts-morph";
 import type { AdapterIndex } from "../adapters.js";
-import { declarationCapabilities } from "./functions.js";
-import { resolveAlias, unwrapExpression, type CallLike } from "./shared.js";
+import { unwrapExpression, type CallLike } from "./shared.js";
+import { functionCapabilities } from "./values.js";
 
 export type ComputedTarget =
   | { kind: "resolved" }
@@ -81,15 +81,10 @@ function constObjectLiteral(expression: Node): ObjectLiteralExpression | undefin
   return literal.getProperties().some((p) => Node.isSpreadAssignment(p)) ? undefined : literal;
 }
 
-/** `{ read: readFileSync }` or `{ fetch }`: a member that is a capability function itself. */
+/** `{ read: readFileSync }` or `{ fetch }`, or a const alias of one: a member that is a capability function itself. */
 function storesCapabilityFunction(property: Node, adapters: AdapterIndex): boolean {
-  const symbol = Node.isShorthandPropertyAssignment(property)
-    ? property.getValueSymbol()
-    : Node.isPropertyAssignment(property)
-      ? property.getInitializer()?.getSymbol()
-      : undefined;
-  if (!symbol) return false;
-  return resolveAlias(symbol).getDeclarations().some((d) => declarationCapabilities(d, [], adapters).length > 0);
+  const symbol = property.getSymbol();
+  return symbol !== undefined && functionCapabilities(symbol, adapters).length > 0;
 }
 
 function callableMembers(type: Type, at: Node): MorphSymbol[] {
@@ -97,5 +92,5 @@ function callableMembers(type: Type, at: Node): MorphSymbol[] {
 }
 
 function isSensitive(member: MorphSymbol, adapters: AdapterIndex): boolean {
-  return member.getDeclarations().some((d) => declarationCapabilities(d, [], adapters).length > 0);
+  return functionCapabilities(member, adapters).length > 0;
 }

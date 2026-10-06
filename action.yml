@@ -7,11 +7,11 @@ branding:
 
 inputs:
   args:
-    description: Arguments for `permlang check`, such as source paths or `--project tsconfig.json`.
+    description: Arguments for `permlang check`, such as source paths or `--project tsconfig.json`. The lock file records them, so changing them needs `permlang lock` with the same arguments.
     required: false
     default: ""
   strictness:
-    description: sketch, development, or production. Overrides permlang.config.json.
+    description: sketch, development, or production. Overrides permlang.config.json, and like it, is recorded in the lock file.
     required: false
     default: ""
   working-directory:
@@ -33,16 +33,58 @@ inputs:
 
 outputs:
   exit-code:
-    description: The exit code of `permlang check` (0 no errors, 1 permission errors, 2 configuration error).
+    description: The exit code of `permlang check` (0 no errors, 1 permission errors, 2 anything else, such as a usage or configuration error).
     value: ${{ steps.check.outputs.exit-code }}
 
 runs:
   using: composite
   steps:
+    # PermLang runs on Node 22, called by its full path, so the Node that later steps of your job
+    # use doesn't change. GitHub-hosted runners have Node 22 in their tool cache. Elsewhere,
+    # actions/setup-node installs it, and (as it always does) puts it first on the PATH.
+    - name: Find Node
+      id: cached-node
+      shell: bash
+      run: |
+        cache="$RUNNER_TOOL_CACHE"
+        # Git Bash on Windows needs the cache's path in its own form for the glob below.
+        if [ "$RUNNER_OS" = Windows ] && [ -n "$cache" ]; then cache=$(cygpath -u "$cache"); fi
+        arch=$(printf '%s' "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')
+        best=""
+        for complete in "$cache"/node/22.*/"$arch".complete; do
+          [ -f "$complete" ] || continue
+          version=$(basename "$(dirname "$complete")")
+          best=$(printf '%s\n%s\n' "$best" "$version" | sed '/^$/d' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)
+        done
+        node=""
+        if [ -n "$best" ]; then
+          for candidate in "$cache/node/$best/$arch/bin/node" "$cache/node/$best/$arch/node.exe"; do
+            if [ -x "$candidate" ] && "$candidate" --version > /dev/null 2>&1; then
+              node="$candidate"
+              break
+            fi
+          done
+        fi
+        echo "path=$node" >> "$GITHUB_OUTPUT"
+
     - name: Set up Node
+      if: steps.cached-node.outputs.path == ''
       uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
         node-version: 22
+        # PermLang's own build is cached below. Caching your package manager's files isn't
+        # needed, and fails in some monorepos (a packageManager field and no root lockfile).
+        package-manager-cache: false
+
+    - name: Locate Node
+      id: node
+      shell: bash
+      env:
+        CACHED: ${{ steps.cached-node.outputs.path }}
+      run: |
+        node="${CACHED:-$(command -v node)}"
+        "$node" --version
+        echo "path=$node" >> "$GITHUB_OUTPUT"
 
     # The build is cached, keyed on PermLang's own sources, so only the first run
     # for each PermLang version installs and compiles. (hashFiles() only works inside
@@ -59,7 +101,9 @@ runs:
         if command -v sha256sum > /dev/null; then sha=(sha256sum); else sha=(shasum -a 256); fi
         hash=$(cat package-lock.json tsconfig.json tsconfig.build.json $(find src -name '*.ts' | sort) | "${sha[@]}" | cut -c1-16)
         echo "key=permlang-build-${{ runner.os }}-node22-$hash" >> "$GITHUB_OUTPUT"
-        echo "dir=$(pwd -P)" >> "$GITHUB_OUTPUT"
+        # actions/cache reads the path as a Windows path there: Git Bash's /d/a/... would
+        # name a folder that doesn't exist, and nothing would be saved.
+        if [ "$RUNNER_OS" = Windows ]; then echo "dir=$(cygpath -m "$(pwd -P)")" >> "$GITHUB_OUTPUT"; else echo "dir=$(pwd -P)" >> "$GITHUB_OUTPUT"; fi
 
     - name: Restore the build
       id: build-cache
@@ -74,7 +118,12 @@ runs:
       if: steps.build-cache.outputs.cache-hit != 'true'
       shell: bash
       working-directory: ${{ github.action_path }}
-      run: npm ci --ignore-scripts --no-audit --no-fund && npm run build
+      env:
+        NODE: ${{ steps.node.outputs.path }}
+      run: |
+        # This step's own PATH only: npm, and the build it runs, use PermLang's Node.
+        PATH="$(dirname "$NODE"):$PATH"
+        npm ci --ignore-scripts --no-audit --no-fund && npm run build
 
     - name: Save the build
       if: steps.build-cache.outputs.cache-hit != 'true'
@@ -85,23 +134,71 @@ runs:
           ${{ steps.build-key.outputs.dir }}/dist
         key: ${{ steps.build-key.outputs.key }}
 
+    # Deleting the lock file mustn't turn the check off. When the base commit of a pull
+    # request (or merge queue entry) has the lock, the check requires it; when the base
+    # can't be fetched, too.
+    - name: Look up the base commit
+      id: base
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        NODE: ${{ steps.node.outputs.path }}
+        ARGS: ${{ inputs.args }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+      run: |
+        set +e
+        set -f  # ARGS is split on spaces, like a command line, but never glob-expanded.
+        # The lock file the check reads: --lock in the arguments, else permlang.lock.json.
+        lock=permlang.lock.json
+        args=($ARGS)
+        for ((i = 0; i + 1 < ${#args[@]}; i++)); do
+          if [ "${args[i]}" = "--lock" ]; then lock="${args[i+1]}"; fi
+        done
+        fetched=false
+        base_has_lock=false
+        require=false
+        if [ -n "$BASE_SHA" ]; then
+          if git fetch --no-tags --depth=1 origin "$BASE_SHA"; then
+            fetched=true
+            if git cat-file -e "$BASE_SHA:./$lock" 2> /dev/null; then
+              base_has_lock=true
+              require=true
+            fi
+          else
+            echo "::warning::Couldn't fetch the base commit, so a missing lock file fails the check, and the permission diff can't be shown."
+            require=true
+          fi
+        fi
+        # This folder, from the repository root: it tells apart several runs on one pull request.
+        folder=$("$NODE" -e 'const p = require("path"); process.stdout.write(p.relative(process.env.GITHUB_WORKSPACE || ".", ".").split(p.sep).join("/").replace(/[\x00-\x1f]/g, ""))')
+        {
+          echo "lock=$lock"
+          echo "fetched=$fetched"
+          echo "base-has-lock=$base_has_lock"
+          echo "require-lock=$require"
+          echo "sarif-category=permlang${folder:+/$folder}"
+        } >> "$GITHUB_OUTPUT"
+
     - name: Check permissions
       id: check
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
+        NODE: ${{ steps.node.outputs.path }}
         PERMLANG: ${{ github.action_path }}/dist/cli.js
         STRICTNESS: ${{ inputs.strictness }}
         ARGS: ${{ inputs.args }}
         SARIF: ${{ inputs.sarif }}
+        REQUIRE_LOCK: ${{ steps.base.outputs.require-lock }}
       run: |
         set +e
         set -f  # ARGS is split on spaces, like a command line, but never glob-expanded.
         extra=()
         [ -n "$STRICTNESS" ] && extra+=(--strictness "$STRICTNESS")
+        [ "$REQUIRE_LOCK" = "true" ] && extra+=(--require-lock)
         [ "$SARIF" = "true" ] && extra+=(--sarif "$RUNNER_TEMP/permlang.sarif")
         # Annotations put each problem on its line in the pull request's "Files changed" tab.
-        node "$PERMLANG" check $ARGS "${extra[@]}" --github-annotations
+        "$NODE" "$PERMLANG" check $ARGS "${extra[@]}" --github-annotations
         echo "exit-code=$?" >> "$GITHUB_OUTPUT"
 
     - name: Upload to code scanning
@@ -112,13 +209,15 @@ runs:
       uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
       with:
         sarif_file: ${{ runner.temp }}/permlang.sarif
-        category: permlang
+        # One category per folder, so runs for several folders don't replace each other's alerts.
+        category: ${{ steps.base.outputs.sarif-category }}
 
     - name: Comment the permission diff
       if: github.event_name == 'pull_request' && inputs.comment == 'true'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
+        NODE: ${{ steps.node.outputs.path }}
         PERMLANG: ${{ github.action_path }}/dist/cli.js
         GH_TOKEN: ${{ inputs.github-token }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -126,16 +225,34 @@ runs:
         REPO: ${{ github.repository }}
         HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         ARGS: ${{ inputs.args }}
+        STRICTNESS: ${{ inputs.strictness }}
+        LOCK: ${{ steps.base.outputs.lock }}
+        FETCHED: ${{ steps.base.outputs.fetched }}
+        BASE_HAS_LOCK: ${{ steps.base.outputs.base-has-lock }}
       run: |
+        # Failures here are warnings, except one: a comment that can't be updated would go on
+        # showing an earlier push's diff as if it were current.
+        set +e
         set -f  # ARGS is split on spaces, like a command line, but never glob-expanded.
-        if [ ! -f permlang.lock.json ]; then
-          echo "No permlang.lock.json; run \`permlang lock\` and commit it to get a permission diff."
+        if [ ! -f "$LOCK" ] && [ "$FETCHED" = true ] && [ "$BASE_HAS_LOCK" != true ]; then
+          echo "No lock file here or at the base commit; run \`permlang lock\` and commit it to get a permission diff."
           exit 0
         fi
-        git fetch --no-tags --depth=1 origin "$BASE_SHA"
-        # The same source selection as the check, so "Where it happens" can be filled in.
-        node "$PERMLANG" diff "$BASE_SHA" $ARGS --format markdown > "$RUNNER_TEMP/permlang-diff.md"
-        cat "$RUNNER_TEMP/permlang-diff.md" >> "$GITHUB_STEP_SUMMARY"
+        body="$RUNNER_TEMP/permlang-diff.md"
+        extra=()
+        [ -n "$STRICTNESS" ] && extra+=(--strictness "$STRICTNESS")
+        # The same files and settings as the check. When the diff fails, this still prints a
+        # comment that says so.
+        "$NODE" "$PERMLANG" diff "$BASE_SHA" $ARGS "${extra[@]}" --format markdown > "$body"
+        status=$?
+        if [ "$status" -ne 0 ]; then
+          echo "::warning::Couldn't compute the permission diff (see the error above). The comment says so."
+        fi
+        if [ ! -s "$body" ]; then
+          echo "::warning::No permission diff to post."
+          exit 0
+        fi
+        cat "$body" >> "$GITHUB_STEP_SUMMARY"
 
         # A pull request from a fork gets a read-only token: the diff stays in the job summary.
         if [ "$HEAD_REPO" != "$REPO" ]; then
@@ -143,19 +260,38 @@ runs:
           exit 0
         fi
 
-        # Posting is best effort: the check result, not the comment, decides the job.
-        set +e
-        body="$(cat "$RUNNER_TEMP/permlang-diff.md")"
-        # Only a bot's comment counts: anyone can post a comment with the same marker,
-        # and editing (or leaving standing) a planted one would show a fake diff.
-        existing=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-          --jq '.[] | select(.user.type == "Bot" and (.body | startswith("<!-- permlang-diff -->"))) | .id' | head -1)
-        if [ -n "$existing" ]; then
-          gh api --method PATCH "repos/$REPO/issues/comments/$existing" -f body="$body" > /dev/null
-        else
-          gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$body" > /dev/null
-        fi
+        # The comment to update is this run's (its first line is the marker, which names the
+        # folder), posted by this token's own account: github-actions[bot] for the default
+        # token, or a personal token's owner. Anyone can post a comment with the marker, and
+        # editing (or leaving standing) a planted one would show a fake diff.
+        me=$(gh api graphql -f query='query { viewer { login } }' --jq .data.viewer.login 2> /dev/null)
+        [ -n "$me" ] || me=$(gh api user --jq .login 2> /dev/null)
+        [ -n "$me" ] || me="github-actions"
+        # The REST API names an app's account <app>[bot]; GraphQL leaves the suffix off.
+        me="${me%\[bot\]}"
+        marker=$(head -n 1 "$body")
+        comments=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate --jq '.[] | [.id, .user.login, (.body | split("\n") | .[0])] | @tsv')
         if [ $? -ne 0 ]; then
+          echo "::warning::Couldn't list the pull request's comments, so the permission diff can't be posted. It's in the job summary."
+          exit 0
+        fi
+        existing=""
+        while IFS=$'\t' read -r id login first; do
+          if { [ "$login" = "$me" ] || [ "$login" = "$me[bot]" ]; } && [ "$first" = "$marker" ]; then
+            existing="$id"
+            break
+          fi
+        done <<< "$comments"
+
+        # The body goes in a file: a long one doesn't fit on a command line.
+        request="$RUNNER_TEMP/permlang-comment.json"
+        "$NODE" -e 'process.stdout.write(JSON.stringify({ body: require("fs").readFileSync(process.argv[1], "utf8") }))' "$body" > "$request"
+        if [ -n "$existing" ]; then
+          if ! gh api --method PATCH "repos/$REPO/issues/comments/$existing" --input "$request" > /dev/null; then
+            echo "::error::Couldn't update the permission diff comment, which still shows an earlier push's diff. The current diff is in the job summary."
+            exit 1
+          fi
+        elif ! gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" --input "$request" > /dev/null; then
           echo "::warning::Couldn't post the permission diff comment (the token needs pull-requests: write). It's in the job summary."
         fi
 

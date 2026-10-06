@@ -43,16 +43,20 @@ describe("permlang diff", () => {
     const { code, out } = permlang("diff", "HEAD", "my lib", "--format", "markdown");
     expect(code).toBe(0);
     expect(out).toContain("<code>+ net(data-broker.io)</code>");
-    expect(out).toContain("fetch(&quot;https://data-broker.io/&quot;)");
+    expect(out).toContain("fetch(&quot;https:\u{200b}//data-broker.io/&quot;)");
   });
 
-  it("still prints the diff when the code can't be analyzed for paths", () => {
+  // It used to say "No permission changes" here, with only a line in the job log saying the
+  // code wasn't analyzed (found in the code review, G7).
+  it("still prints the diff when the code can't be analyzed, and says the code wasn't analyzed", () => {
     permlang("init", "my lib");
     git("add", "-A");
     git("commit", "-q", "-m", "base");
     const { code, out } = permlang("diff", "HEAD", "--format", "markdown");
     expect(code).toBe(0);
-    expect(out).toContain("No permission changes");
+    expect(out).toContain("PermLang couldn't analyze the code");
+    expect(out.replaceAll("\u{200b}", "")).toContain("Not found: src");
+    expect(out).not.toContain("No permission changes");
   });
 
   it("shows access the lock doesn't record yet, so a PR that skips `permlang lock` isn't reported as clean", () => {
@@ -119,10 +123,14 @@ describe("permlang check output", () => {
   it("prints the report as JSON, with paths relative to the folder it runs in", () => {
     const { code, out } = permlang("check", "my lib", "--no-lock", "--json");
     expect(code).toBe(1);
-    const report = JSON.parse(out) as { version: number; diagnostics: { file: string; code: string }[]; functions: { file: string; actual: string[] }[] };
+    const report = JSON.parse(out) as { version: number; diagnostics: { file: string; code: string }[]; functions: { file: string; actual: string[]; kind?: string }[] };
     expect(report.version).toBe(1);
     expect(report.diagnostics).toEqual([expect.objectContaining({ file: "my lib/app.ts", code: "PERM003" })]);
-    expect(report.functions).toEqual([expect.objectContaining({ file: "my lib/app.ts", actual: ["net(api.example.com)"] })]);
+    expect(report.functions).toEqual([
+      expect.objectContaining({ file: "my lib/app.ts", actual: ["net(api.example.com)"] }),
+      // The settings the check ran with, as the lock records them.
+      expect.objectContaining({ file: "permlang.config.json", kind: "config", actual: ["permlang.files(my lib)", "permlang.strictness(development)", "permlang.tools(warn)", "permlang.unmapped(warn)"] }),
+    ]);
   });
 
   it("says when there's nothing to report", () => {
@@ -391,7 +399,7 @@ describe("permlang check --sarif", () => {
     };
     const [result] = sarif.runs[0]!.results;
     expect(result!.ruleId).toBe("PERM003");
-    expect(result!.locations[0]!.physicalLocation.artifactLocation.uri).toBe("my lib/app.ts");
+    expect(result!.locations[0]!.physicalLocation.artifactLocation.uri).toBe("my%20lib/app.ts");
     expect(result!.locations[0]!.physicalLocation.region.startLine).toBe(2);
   });
 });

@@ -3,14 +3,14 @@
 // dynamic), and computed calls (to decide whether an object is sensitive).
 
 import { Node } from "ts-morph";
-import type { AdapterIndex } from "../adapters.js";
+import { packageName, type AdapterIndex } from "../adapters.js";
 import { UNVERIFIABLE, type Capability } from "../capability.js";
 import { fetchCapability, isGlobalFetch } from "./fetch.js";
 import { fsCapabilities, fsFunctionName } from "./fs.js";
 import { drizzleCapabilities } from "./drizzle.js";
 import { prismaCapabilities } from "./prisma.js";
 import { containerName, isGlobalLibFunction, type CallLike } from "./shared.js";
-import { sqlCapabilities } from "./sql.js";
+import { SQL_PACKAGES, sqlCapabilities } from "./sql.js";
 
 export function declarationCapabilities(
   declaration: Node,
@@ -52,16 +52,21 @@ const CAPABILITY_BUILTINS = new Set([
   "vm", "worker_threads", "cluster", "inspector", "module", "process",
 ]);
 
+// Database clients detected directly rather than by an adapter (prisma.ts, drizzle.ts, sql.ts).
+const DATABASE_PACKAGES = new Set(["@prisma/client", ".prisma", "drizzle-orm", ...SQL_PACKAGES]);
+
 /**
- * Whether require(specifier)'s untyped result could reach a capability: a Node
- * built-in that has them, or a package an adapter maps. JSON, relative files, and
- * other packages resolve like an import does.
+ * Whether a module's untyped value (from require(), or a namespace cast to `any`) could
+ * reach a capability: a Node built-in that has them, a database client, or a package an
+ * adapter maps. Callers rule out packages declared pure first; other packages and
+ * project files are handled by modules.ts.
  */
 export function requiresCapabilityModule(specifier: string | undefined, adapters: AdapterIndex): boolean {
   if (specifier === undefined) return true;
   if (specifier.startsWith(".") || specifier.startsWith("/")) return false;
   const bare = specifier.replace(/^node:/, "");
-  return CAPABILITY_BUILTINS.has(bare) || CAPABILITY_BUILTINS.has(bare.split("/")[0]!) || adapters.hasPackage(bare);
+  const pkg = packageName(bare);
+  return CAPABILITY_BUILTINS.has(bare) || CAPABILITY_BUILTINS.has(bare.split("/")[0]!) || DATABASE_PACKAGES.has(pkg) || adapters.hasPackage(bare);
 }
 
 const TIMERS = ["setTimeout", "setInterval", "setImmediate"];

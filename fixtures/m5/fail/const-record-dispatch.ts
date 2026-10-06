@@ -10,10 +10,11 @@ export function run(kind: string) {
   return handlers[kind]!(); // expect: error PERM001 net(ping.example)
 }
 
-// Library functions stored in the record make it sensitive. Storing them is itself a use.
+// Library functions stored in the record make it sensitive. Storing them is itself a use, and
+// readFileSync could then be called with a writing flag.
 const fsOps: Record<string, (path: string) => unknown> = {
-  read: readFileSync, // expect: error PERM003 fs.read
-  remove: unlinkSync, // expect: error PERM003 fs.write
+  read: readFileSync, // expect: error PERM003 fs.read expect: error PERM003 fs.write
+  remove: unlinkSync, // fs.write, reported once above
 };
 
 /** @perm env(MODE) */

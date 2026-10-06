@@ -37,7 +37,7 @@ export function toSarif(report: Report, root: string, version: string): string {
     locations: [
       {
         physicalLocation: {
-          artifactLocation: { uri: relative(d.file, root), uriBaseId: "%SRCROOT%" },
+          artifactLocation: { uri: uri(relative(d.file, root)), uriBaseId: "%SRCROOT%" },
           region: { startLine: d.line, startColumn: d.column },
         },
       },
@@ -64,6 +64,11 @@ export function toSarif(report: Report, root: string, version: string): string {
   return JSON.stringify(sarif, null, 2);
 }
 
+/**
+ * The human-readable report. Every value in it that comes from the analyzed code or a file
+ * (names, paths, capabilities, reasons) goes through printable(), so none can start a line
+ * of its own.
+ */
 export function formatText(report: Report, cwd = process.cwd()): string {
   const lines = report.diagnostics.map((d) => formatDiagnostic(d, cwd));
   const errors = report.diagnostics.filter((d) => d.severity === "error").length;
@@ -71,19 +76,22 @@ export function formatText(report: Report, cwd = process.cwd()): string {
   const files = plural(report.files, "file");
 
   if (report.unresolved.length > 0) {
-    lines.push(`${plural(report.unresolved.length, "import")} with no types, unchecked: ${report.unresolved.join(", ")}.`);
+    lines.push(`${plural(report.unresolved.length, "import")} with no types, unchecked: ${report.unresolved.map(printable).join(", ")}.`);
   }
   if (report.unmapped.length > 0) {
-    const shown = report.unmapped.slice(0, 10).map((u) => `${u.package} (${u.calls})`).join(", ");
+    const shown = report.unmapped.slice(0, 10).map((u) => `${printable(u.package)} (${u.calls})`).join(", ");
     const more = report.unmapped.length > 10 ? `, and ${report.unmapped.length - 10} more (see --json)` : "";
     lines.push(`${plural(report.unmapped.length, "package")} with no adapter, trusted (calls): ${shown}${more}.`);
   }
   if (report.tools.length > 0) {
-    const entries = report.tools.map((t) => `  ${relative(t.file, cwd)}:${t.line} ${t.name} (${t.framework}): ${t.reaches.length > 0 ? t.reaches.join(", ") : "nothing tracked"}`);
+    const entries = report.tools.map((t) => {
+      const reaches = t.reaches.length > 0 ? t.reaches.map(printable).join(", ") : "nothing tracked";
+      return `  ${printable(relative(t.file, cwd))}:${t.line} ${printable(t.name)} (${printable(t.framework)}): ${reaches}`;
+    });
     lines.push([`${plural(report.tools.length, "tool")} an AI model can call:`, ...entries].join("\n"));
   }
   if (report.unsafe.length > 0) {
-    const entries = report.unsafe.map((u) => `  ${relative(u.file, cwd)}:${u.line} ${u.function}: ${u.reason}`);
+    const entries = report.unsafe.map((u) => `  ${printable(relative(u.file, cwd))}:${u.line} ${printable(u.function)}: ${printable(u.reason)}`);
     lines.push([`${plural(report.unsafe.length, "@perm-unsafe override")} (checks suppressed):`, ...entries].join("\n"));
   }
   if (report.diagnostics.length === 0) {
@@ -94,13 +102,37 @@ export function formatText(report: Report, cwd = process.cwd()): string {
   return lines.join("\n\n");
 }
 
+/**
+ * PermLang's own messages break at most once, before the reason ("but ...", "which ...").
+ * Any other line break in a message comes from a value in the code, and is escaped with it.
+ * Only spaces and tabs follow the break: `\s*` would match line breaks too, and scan a message
+ * full of them (text from the code) in quadratic time.
+ */
+const OWN_BREAK = /\n[ \t]*(?=but |which )/;
+
 function formatDiagnostic(d: Diagnostic, cwd: string): string {
   const location = `${relative(d.file, cwd)}:${d.line}:${d.column}`;
-  const [first, ...rest] = d.message.split("\n");
-  const out = [`${location} ${d.severity} ${d.code}: ${first}`, ...rest.map((l) => `  ${l.trim()}`)];
-  if (d.fix) out.push(`  -> ${d.fix}`);
+  const own = OWN_BREAK.exec(d.message);
+  const first = own ? d.message.slice(0, own.index) : d.message;
+  const out = [`${printable(location)} ${d.severity} ${d.code}: ${printable(first)}`];
+  if (own) out.push(`  ${printable(d.message.slice(own.index + own[0].length))}`);
+  if (d.fix) out.push(`  -> ${printable(d.fix)}`);
   return out.join("\n");
 }
+
+/**
+ * Text from analyzed code or files, made safe to print on one line: line breaks, control
+ * characters (terminal escape sequences included), Unicode line separators, and bidirectional
+ * overrides become visible escapes such as `\n` and `\u001b`. Otherwise a string in the code
+ * could print a line of its own, which GitHub Actions obeys when it starts with `::` (a
+ * workflow command that can hide annotations or add fake ones), or drive the terminal.
+ */
+export function printable(text: string): string {
+  return text.replace(UNPRINTABLE, (c) => SHORT_ESCAPES[c] ?? `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+const UNPRINTABLE = /[\x00-\x1f\x7f-\x9f\u{2028}\u{2029}\u{202a}-\u{202e}\u{2066}-\u{2069}]/gu;
+const SHORT_ESCAPES: Record<string, string> = { "\n": "\\n", "\r": "\\r", "\t": "\\t" };
 
 export function toJson(report: Report, cwd = process.cwd()): string {
   return JSON.stringify(
@@ -148,6 +180,11 @@ function property(text: string): string {
 
 function relative(file: string, cwd: string): string {
   return path.relative(cwd, file).replaceAll("\\", "/");
+}
+
+/** A relative path as a URI reference, each segment percent-encoded: `my lib/a#b.ts` → `my%20lib/a%23b.ts`. */
+function uri(relativePath: string): string {
+  return relativePath.split("/").map(encodeURIComponent).join("/");
 }
 
 function plural(n: number, word: string): string {

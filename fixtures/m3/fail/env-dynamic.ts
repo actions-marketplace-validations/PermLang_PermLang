@@ -13,3 +13,9 @@ export function rest() {
   const { PORT, ...others } = process.env; // expect: error PERM001 env
   return { PORT, others };
 }
+
+/** @perm env(PORT) */
+export function computedKey(name: string) {
+  const { [name]: value } = process.env; // expect: error PERM001 env
+  return value;
+}

@@ -6,17 +6,10 @@
   ],
   "default": [],
   "functions": {
-    "fork": [
-      "exec"
-    ],
-    "setupPrimary": [
-      "exec"
-    ],
-    "setupMaster": [
-      "exec"
-    ],
-    "open": [
-      "net"
-    ]
+    "Cluster.fork": ["exec"],
+    "Cluster.setupPrimary": ["exec"],
+    "Cluster.setupMaster": ["exec"],
+    "open": ["net"],
+    "Session.post": ["unverifiable"]
   }
 }

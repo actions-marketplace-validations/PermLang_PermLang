@@ -66,6 +66,13 @@ describe("SARIF output", () => {
     expect(run.results[1]).toMatchObject({ ruleId: "PERM006", ruleIndex: 1, level: "warning" });
   });
 
+  // SARIF locations are URIs: a space, `#`, or `%` in a file name must be percent-encoded, or
+  // code scanning reads a different path (found in the code review, O5).
+  it("percent-encodes each part of the path", () => {
+    const odd = JSON.parse(toSarif(report([diagnostic({ file: path.join(root, "my lib", "a#b%c?.ts") })]), root, "0.2.2")) as Sarif;
+    expect(odd.runs[0]!.results[0]!.locations[0]!.physicalLocation.artifactLocation.uri).toBe("my%20lib/a%23b%25c%3F.ts");
+  });
+
   it("is an empty run when there are no findings, so stale alerts close", () => {
     const empty = JSON.parse(toSarif(report([]), root, "0.2.2")) as Sarif;
     expect(empty.runs[0]!.results).toEqual([]);

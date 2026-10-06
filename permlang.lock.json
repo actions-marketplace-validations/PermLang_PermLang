@@ -1,5 +1,5 @@
 {
-  "permlang": 1,
+  "permlang": 2,
   "functions": {
     ".github/workflows/ci.yml#<ci.yml>": [
       "ci.action(actions/checkout)",
@@ -56,6 +56,13 @@
       "npm.script(test:watch: vitest)",
       "npm.script(typecheck: tsc --noEmit)"
     ],
+    "permlang.config.json#<permlang.config.json>": [
+      "permlang.adapter(permlang/adapters/ts-morph.json sha256:4b4ff4cd85055020)",
+      "permlang.files(src)",
+      "permlang.strictness(development)",
+      "permlang.tools(warn)",
+      "permlang.unmapped(error)"
+    ],
     "src/adapters.ts#builtinAdapterPaths": [
       "fs.read"
     ],
@@ -80,6 +87,18 @@
       "fs.read(tsconfig.json)",
       "fs.write"
     ],
+    "src/load.ts#add": [
+      "fs.read"
+    ],
+    "src/load.ts#blanking": [
+      "fs.read"
+    ],
+    "src/load.ts#projectOfFiles": [
+      "fs.read"
+    ],
+    "src/load.ts#projectOfTsConfig": [
+      "fs.read"
+    ],
     "src/main.ts#analyze": [
       "fs.read",
       "fs.read(permlang.config.json)",
@@ -95,6 +114,10 @@
     "src/main.ts#defaultBranch": [
       "exec"
     ],
+    "src/main.ts#dependencyAdapters": [
+      "fs.read",
+      "fs.read(permlang.config.json)"
+    ],
     "src/main.ts#dependencyChanges": [
       "exec",
       "fs.read",
@@ -102,6 +125,14 @@
       "fs.read(permlang.config.json)"
     ],
     "src/main.ts#diff": [
+      "env(GITHUB_WORKSPACE)",
+      "exec",
+      "fs.read",
+      "fs.read(package.json)",
+      "fs.read(permlang.config.json)",
+      "fs.read(tsconfig.json)"
+    ],
+    "src/main.ts#diffAt": [
       "exec",
       "fs.read",
       "fs.read(package.json)",
@@ -117,9 +148,12 @@
     "src/main.ts#findSpecFiles": [
       "fs.read"
     ],
+    "src/main.ts#git": [
+      "exec"
+    ],
     "src/main.ts#gitRoot": [
       "exec",
-      "fs.write"
+      "fs.read"
     ],
     "src/main.ts#init": [
       "exec",
@@ -155,9 +189,13 @@
     "src/main.ts#packageVersion": [
       "fs.read"
     ],
-    "src/main.ts#readConfig": [
+    "src/main.ts#readText": [
+      "fs.read"
+    ],
+    "src/main.ts#settingsFor": [
       "fs.read",
-      "fs.read(permlang.config.json)"
+      "fs.read(permlang.config.json)",
+      "fs.read(tsconfig.json)"
     ],
     "src/main.ts#spec": [
       "fs.read",
@@ -170,12 +208,21 @@
     ],
     "src/main.ts#workflowTarget": [
       "exec",
+      "fs.read"
+    ],
+    "src/main.ts#writeText": [
       "fs.write"
     ],
     "src/package-files.ts#folders": [
       "fs.read"
     ],
+    "src/package-files.ts#readManifest": [
+      "fs.read"
+    ],
     "src/package-files.ts#workspaceFolders": [
+      "fs.read"
+    ],
+    "src/package-files.ts#workspacePatterns": [
       "fs.read"
     ],
     "src/project-files.ts#Entry.constructor": [
@@ -206,6 +253,25 @@
       "fs.read"
     ],
     "src/project-files.ts#projectFiles": [
+      "fs.read"
+    ],
+    "src/settings.ts#contentHash": [
+      "fs.read"
+    ],
+    "src/settings.ts#readConfig": [
+      "fs.read",
+      "fs.read(permlang.config.json)"
+    ],
+    "src/settings.ts#readIfFile": [
+      "fs.read"
+    ],
+    "src/settings.ts#readTsConfig": [
+      "fs.read"
+    ],
+    "src/settings.ts#settingsEntries": [
+      "fs.read"
+    ],
+    "src/settings.ts#tsconfigEntry": [
       "fs.read"
     ],
     "src/spec/parse.ts#parseSpecs": [

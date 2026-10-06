@@ -126,12 +126,13 @@ function argCovers(name: string, declared: string | undefined, actual: string | 
 }
 
 function pathCovers(declared: string, actual: string): boolean {
-  const d = normalizePath(declared);
-  const a = normalizePath(actual);
-  // Where a relative path falls under an absolute one depends on where the program runs.
-  if (isAbsolute(d) !== isAbsolute(a)) return false;
-  const ds = segments(d);
-  const as = segments(a);
+  const d = parsePath(declared);
+  const a = parsePath(actual);
+  // Paths under different roots never cover each other: where a relative path falls under an
+  // absolute one depends on where the program runs, and `\\server\share` isn't under `/server`.
+  if (d.root !== a.root) return false;
+  const ds = d.segments;
+  const as = a.segments;
   const up = (s: string[]) => s.filter((x) => x === "..").length;
   // `.`, `..`, `../..`: the working directory or a folder above it, which also holds paths
   // that climb fewer levels. `..` covers `a` and `../b`, but not `../../c`.
@@ -139,19 +140,22 @@ function pathCovers(declared: string, actual: string): boolean {
   return as.length >= ds.length && ds.every((s, i) => as[i] === s);
 }
 
-/** With forward slashes, and `..` resolved; a Windows drive (`C:`) stays the root. */
-function normalizePath(p: string): string {
+/**
+ * A path's root and its segments, with forward slashes and `..` resolved. The root is one of:
+ * `""` (relative), `/`, a Windows drive (`C:/`), a network share (`//`, followed by the server
+ * and share as the first segments), or a drive-relative path's drive (`C:`, for `C:x`, which is
+ * relative to drive C's own working directory, not the program's). Below an absolute root, `..`
+ * can't climb further; in a relative path, it only appears at the start.
+ */
+function parsePath(p: string): { root: string; segments: string[] } {
   const slashed = p.replaceAll("\\", "/");
-  const drive = /^[A-Za-z]:(?=\/)/.exec(slashed)?.[0] ?? "";
-  return drive + path.posix.normalize(slashed.slice(drive.length));
-}
-
-/** `/x`, or a Windows drive path such as `C:/x`. */
-function isAbsolute(p: string): boolean {
-  return path.posix.isAbsolute(p) || /^[A-Za-z]:\//.test(p);
-}
-
-/** Without `.` or empty segments. Once normalized, `..` only appears at the start. */
-function segments(p: string): string[] {
-  return p.split("/").filter((s) => s !== "" && s !== ".");
+  const root = /^(\/\/|[A-Za-z]:\/?|\/)/.exec(slashed)?.[0] ?? "";
+  const rest = slashed.slice(root.length);
+  const absolute = root.endsWith("/");
+  const normalized = path.posix.normalize(absolute ? `/${rest}` : rest);
+  return {
+    // Drive letters are case-insensitive.
+    root: root.toUpperCase(),
+    segments: normalized.split("/").filter((s) => s !== "" && s !== "."),
+  };
 }

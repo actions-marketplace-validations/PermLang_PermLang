@@ -45,3 +45,53 @@ describe("new dependencies", () => {
     expect(addedDependencies({ devDependencies: { zod: "^3.0.0" } }, { dependencies: { zod: "^3.0.0" } }, adapters, read)).toEqual([]);
   });
 });
+
+// Found in the code review (G8): npm installs optional and peer dependencies too, and a package
+// switched to another source keeps its name, and so its adapter, while its code changes.
+describe("dependencies in every section, and from other sources", () => {
+  const base: PackageJson = { dependencies: { lodash: "^4.17.21", zod: "^3.0.0", local: "file:../local" } };
+
+  it("lists new optional and peer dependencies", () => {
+    const added = addedDependencies(base, { ...base, optionalDependencies: { "sketchy-telemetry": "1.0.0" }, peerDependencies: { react: "^19.0.0" } }, adapters, read);
+    expect(added.map((d) => `${d.name} ${d.section} ${d.change}`)).toEqual(["sketchy-telemetry optionalDependencies added", "react peerDependencies added"]);
+    expect(added[0]!.installScripts).toEqual(["postinstall: node collect.js"]);
+  });
+
+  it.each([
+    ["an npm alias", "npm:evil-lodash@1.0.0"],
+    ["a git URL", "git+https://github.com/evil/lodash.git"],
+    ["a GitHub shorthand", "evil/lodash#main"],
+    ["a tarball URL", "https://evil.example/lodash.tgz"],
+    ["a local folder", "file:../lodash"],
+    ["a local tarball", "./vendor/lodash-4.17.21.tgz"],
+  ])("reports an existing dependency switched to %s", (_, version) => {
+    const changes = addedDependencies(base, { dependencies: { ...base.dependencies as object, lodash: version } }, adapters, read);
+    expect(changes).toEqual([expect.objectContaining({ name: "lodash", version, previous: "^4.17.21", change: "source", section: "dependencies" })]);
+  });
+
+  it("doesn't report a version bump from the registry, or a local source that didn't change", () => {
+    expect(addedDependencies(base, { dependencies: { ...base.dependencies as object, lodash: "^4.18.0", zod: "latest" } }, adapters, read)).toEqual([]);
+    expect(addedDependencies(base, base, adapters, read)).toEqual([]);
+  });
+
+  it("reports a source that changed to another", () => {
+    expect(addedDependencies(base, { dependencies: { ...base.dependencies as object, local: "file:../elsewhere" } }, adapters, read)).toEqual([
+      expect.objectContaining({ name: "local", previous: "file:../local", version: "file:../elsewhere", change: "source" }),
+    ]);
+  });
+
+  // A pull request's package.json can have anything in it; a number crashed the diff (O2).
+  it("shows a version that isn't a string as written, and ignores sections that aren't objects", () => {
+    const odd = { dependencies: { zod: "^3.0.0", weird: 1, nested: { a: 1 } }, devDependencies: "nope", optionalDependencies: ["x"] } as unknown as PackageJson;
+    expect(addedDependencies({ dependencies: { zod: "^3.0.0" } }, odd, adapters, read).map((d) => `${d.name} ${d.version}`)).toEqual(["nested {\"a\":1}", "weird 1"]);
+  });
+});
+
+describe("a package in more than one section", () => {
+  it("counts a package the base lists twice once, and lists a new one the change lists twice once", () => {
+    const base: PackageJson = { devDependencies: { react: "^19.0.0" }, peerDependencies: { react: "^19.0.0" } };
+    const head: PackageJson = { ...base, dependencies: { zod: "^3.0.0" }, devDependencies: { react: "^19.0.0", zod: "^3.0.0" } };
+    expect(addedDependencies(base, head, adapters, read).map((d) => `${d.name} ${d.section}`)).toEqual(["zod dependencies"]);
+    expect(addedDependencies(base, base, adapters, read)).toEqual([]);
+  });
+});

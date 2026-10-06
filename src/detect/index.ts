@@ -11,8 +11,10 @@ import { classifyComputedCall, computedCallee } from "./computed.js";
 import { envUses } from "./env.js";
 import { anyEscapes } from "./escapes.js";
 import { fetchCapability, isUnresolvedFetch } from "./fetch.js";
-import { declarationCapabilities, isRequire, isTimer, requiresCapabilityModule } from "./functions.js";
+import { declarationCapabilities, isTimer } from "./functions.js";
+import { isUrlSpecifier, loadOf, loadTarget } from "./modules.js";
 import { argumentsOf, callText, literalString, resolveAlias, resolvedDeclaration, unwrapExpression, type CallLike, type CapabilityUse } from "./shared.js";
+import { descendantsOfKind, forEachDescendant } from "../walk.js";
 import { valueUses } from "./values.js";
 import { webCapabilities } from "./web.js";
 
@@ -26,23 +28,44 @@ export interface DetectedUse {
 
 export function detectInFile(sourceFile: SourceFile, adapters: AdapterIndex): DetectedUse[] {
   const found: DetectedUse[] = [];
-  sourceFile.forEachDescendant((node) => {
+  forEachDescendant(sourceFile, (node) => {
     if (!Node.isCallExpression(node) && !Node.isNewExpression(node) && !Node.isTaggedTemplateExpression(node)) return;
     const capabilities = callCapabilities(node, adapters);
     if (capabilities.length === 0) return;
     const call = callText(node);
     found.push({ node, uses: capabilities.map((capability) => ({ capability, call, verb: "calls" })) });
   });
-  found.push(...envUses(sourceFile), ...valueUses(sourceFile, adapters), ...anyEscapes(sourceFile, adapters));
+  found.push(...urlImports(sourceFile), ...envUses(sourceFile), ...valueUses(sourceFile, adapters), ...anyEscapes(sourceFile, adapters));
   return found;
 }
 
 const unverifiable: Capability[] = [{ name: UNVERIFIABLE }];
 
+/** `import "data:..."`, `export * from "https://..."`: code that isn't in the project runs on import. */
+function urlImports(sourceFile: SourceFile): DetectedUse[] {
+  const declarations = [...sourceFile.getImportDeclarations(), ...sourceFile.getExportDeclarations(), ...descendantsOfKind(sourceFile, SyntaxKind.ImportEqualsDeclaration)];
+  return declarations.flatMap((node) => {
+    const specifier = moduleSpecifierOf(node);
+    if (specifier === undefined || !isUrlSpecifier(specifier)) return [];
+    const call = node.getText().replace(/\s+/g, " ");
+    return [{ node, uses: [{ capability: unverifiable[0]!, call: call.length > 70 ? `${call.slice(0, 67)}...` : call, verb: "calls" as const }] }];
+  });
+}
+
+function moduleSpecifierOf(node: Node): string | undefined {
+  if (Node.isImportDeclaration(node) || Node.isExportDeclaration(node)) return node.isTypeOnly() ? undefined : node.getModuleSpecifierValue();
+  if (!Node.isImportEqualsDeclaration(node) || node.isTypeOnly()) return undefined;
+  const reference = node.getModuleReference();
+  return Node.isExternalModuleReference(reference) ? literalString(reference.getExpression()) : undefined;
+}
+
 function callCapabilities(call: CallLike, adapters: AdapterIndex): Capability[] {
-  // import(specifier): a literal one is a call-graph edge to that module; any other is unknowable.
-  if (Node.isCallExpression(call) && call.getExpression().getKind() === SyntaxKind.ImportKeyword) {
-    return literalString(call.getArguments()[0]) === undefined ? unverifiable : [];
+  // require(x) and import(x). A typed load is followed like an import (call-graph edges);
+  // an untyped one by what it loads (modules.ts). A URL is never typed.
+  const load = loadOf(call);
+  if (load) {
+    if (!load.untyped && !(load.specifier !== undefined && isUrlSpecifier(load.specifier))) return [];
+    return loadTarget(load, adapters).kind === "unverifiable" ? unverifiable : [];
   }
 
   const computed = computedCallee(call);
@@ -56,8 +79,7 @@ function callCapabilities(call: CallLike, adapters: AdapterIndex): Capability[] 
   // `(() => {}).constructor("code")()` is eval without naming either.
   if (!Node.isTaggedTemplateExpression(call) && isFunctionTyped(call.getExpression())) return unverifiable;
 
-  // Types erased with `any`: `declare const require: any`, or `(setTimeout as any)("code")`.
-  if (isAnyTypedRequire(call)) return requiresCapabilityModule(literalString(argumentsOf(call)[0]), adapters) ? unverifiable : [];
+  // Types erased with `any`: `(setTimeout as any)("code")`.
   const erased = erasedCallee(call);
   if (erased && isTimer(erased) && evaluatesString(argumentsOf(call)[0])) return unverifiable;
 
@@ -66,9 +88,6 @@ function callCapabilities(call: CallLike, adapters: AdapterIndex): Capability[] 
   if (web.length > 0) return web;
   if (declaration) {
     if (isTimer(declaration) && evaluatesString(argumentsOf(call)[0])) return unverifiable;
-    if (isRequire(declaration)) {
-      return requiresCapabilityModule(literalString(argumentsOf(call)[0]), adapters) ? unverifiable : [];
-    }
     return declarationCapabilities(declaration, argumentsOf(call), adapters, call);
   }
   if (Node.isCallExpression(call) && isUnresolvedFetch(call)) return [fetchCapability(call.getArguments())];
@@ -83,17 +102,6 @@ function erasedCallee(call: CallLike): Node | undefined {
   if (callee === written || !Node.isIdentifier(callee)) return undefined;
   const symbol = callee.getSymbol();
   return symbol ? resolveAlias(symbol).getDeclarations()[0] : undefined;
-}
-
-/**
- * `declare const require: any; require("child_process")` or `(require as any)("child_process")`:
- * still require, with its types erased.
- */
-function isAnyTypedRequire(call: CallLike): boolean {
-  if (!Node.isCallExpression(call)) return false;
-  const written = call.getExpression();
-  const callee = unwrapExpression(written);
-  return Node.isIdentifier(callee) && callee.getText() === "require" && (callee.getType().isAny() || callee !== written);
 }
 
 /** An expression of the global `Function` interface type, which has no call signatures to resolve. */

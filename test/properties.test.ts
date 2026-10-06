@@ -15,9 +15,10 @@ import { BUILTIN_CAPABILITIES, BUILTIN_VOCABULARY, covers, formatCapability, par
 import type { Diagnostic, Report } from "../src/check.js";
 import { sqlTables } from "../src/detect/sql-tables.js";
 import { parseFlows } from "../src/flows.js";
+import { COMMENT_LIMIT, formatDiffMarkdown } from "../src/diff.js";
 import { diffLocks, LockError, parseLock, serializeLock, type LockFile } from "../src/lock.js";
 import { projectFiles } from "../src/project-files.js";
-import { formatAnnotations, toSarif } from "../src/report.js";
+import { formatAnnotations, printable, toSarif } from "../src/report.js";
 
 /** Anything at all, mixed with the characters that escaping and parsing have to handle. */
 const hostile = fc.oneof(
@@ -85,7 +86,10 @@ describe("output for GitHub", () => {
           expect(rules[r.ruleIndex]!.id).toBe(r.ruleId);
           expect(typeof rules[r.ruleIndex]!.shortDescription.text).toBe("string");
           const { artifactLocation, region } = r.locations[0].physicalLocation;
-          expect([artifactLocation.uri, region.startLine, region.startColumn]).toEqual([file, d.line, d.column]);
+          // A URI: only unreserved characters and `/` stay as they are; each segment decodes back.
+          expect(artifactLocation.uri).toMatch(/^[\w.~%!*'()/-]*$/);
+          const decoded = (artifactLocation.uri as string).split("/").map(decodeURIComponent).join("/");
+          expect([decoded, region.startLine, region.startColumn]).toEqual([file, d.line, d.column]);
         });
       }),
     );
@@ -153,25 +157,45 @@ describe("capabilities", () => {
     );
   });
 
+  // Where each path really is, from a working directory whose folder names differ from the
+  // generated ones, so that `../a` can't land back inside it by coincidence.
+  const cwd = "/w1/w2/w3/w4/w5/w6/w7/w8/w9/w10";
+  const inside = (declared: string, used: string) => {
+    const [d, u] = [declared.replaceAll("\\", "/"), used.replaceAll("\\", "/")];
+    // A relative path's place under an absolute one depends on where the program runs.
+    if (path.posix.isAbsolute(d) !== path.posix.isAbsolute(u)) return false;
+    const [D, U] = [path.posix.resolve(cwd, d), path.posix.resolve(cwd, u)];
+    return U === D || U.startsWith(D.endsWith("/") ? D : `${D}/`);
+  };
+  const relativePath = fc
+    .tuple(fc.array(fc.constantFrom("a", "b", ".", "..", "..a"), { minLength: 1, maxLength: 6 }), fc.constantFrom("/", "\\"), fc.boolean())
+    .map(([segments, separator, trailing]) => segments.join(separator) + (trailing ? separator : ""));
+  const filePath = fc.tuple(fc.boolean(), relativePath).map(([absolute, p]) => (absolute ? "/" : "") + p);
+
   it("a path covers exactly the paths inside it", () => {
-    // Where each path really is, from a working directory whose folder names differ from the
-    // generated ones, so that `../a` can't land back inside it by coincidence.
-    const cwd = "/w1/w2/w3/w4/w5/w6/w7/w8/w9/w10";
-    const inside = (declared: string, used: string) => {
-      const [d, u] = [declared.replaceAll("\\", "/"), used.replaceAll("\\", "/")];
-      // A relative path's place under an absolute one depends on where the program runs.
-      if (path.posix.isAbsolute(d) !== path.posix.isAbsolute(u)) return false;
-      const [D, U] = [path.posix.resolve(cwd, d), path.posix.resolve(cwd, u)];
-      return U === D || U.startsWith(D.endsWith("/") ? D : `${D}/`);
-    };
-    const filePath = fc
-      .tuple(fc.boolean(), fc.array(fc.constantFrom("a", "b", ".", "..", "..a"), { minLength: 1, maxLength: 6 }), fc.constantFrom("/", "\\"), fc.boolean())
-      .map(([absolute, segments, separator, trailing]) => (absolute ? "/" : "") + segments.join(separator) + (trailing ? separator : ""));
     fc.assert(
       fc.property(fc.constantFrom("fs.read", "fs.write"), filePath, filePath, (name, declared, used) => {
         expect(covers([{ name, arg: declared }], { name, arg: used })).toBe(inside(declared, used));
       }),
       { numRuns: 1000 },
+    );
+  });
+
+  it("keeps Windows network shares and drive-relative paths under their own root", () => {
+    // `\\server\share\x` is absolute, but not under `/`; `C:x` is relative to drive C's own working directory.
+    const roots: [string, (d: string, u: string) => boolean][] = [
+      ["\\\\", (d, u) => inside(`/${d}`, `/${u}`)],
+      ["//", (d, u) => inside(`/${d}`, `/${u}`)],
+      ["C:", inside],
+    ];
+    fc.assert(
+      fc.property(fc.constantFrom("fs.read", "fs.write"), filePath, relativePath, relativePath, (name, other, declared, used) => {
+        for (const [root, covered] of roots) {
+          expect(covers([{ name, arg: other }], { name, arg: root + used })).toBe(false);
+          expect(covers([{ name, arg: root + declared }], { name, arg: root + used })).toBe(covered(declared, used));
+        }
+      }),
+      { numRuns: 500 },
     );
   });
 });
@@ -311,17 +335,21 @@ describe("lock file", () => {
       fc.option(fc.integer({ min: 2, max: 4 }), { nil: undefined }),
     )
     .map(([dirs, name, n]) => `${dirs.join("/")}#${name}${n ? `#${n}` : ""}`);
+  // Keys named like Object's own properties crashed the diff (found in the code review, O2).
+  const anyKey = fc.oneof({ weight: 4, arbitrary: key }, fc.constantFrom("toString", "constructor", "__proto__", "hasOwnProperty", "valueOf"));
   const capabilities = fc.array(fc.oneof(fc.constantFrom("net", "exec", "env(HOME)", "ci.permission(contents: write)"), fc.string()), { maxLength: 4 });
   const lock: fc.Arbitrary<LockFile> = fc
-    .record({ functions: fc.dictionary(key, capabilities, { maxKeys: 6 }), unsafe: fc.dictionary(key, fc.string(), { maxKeys: 3 }) })
-    .map((l) => ({ permlang: 1, ...l }));
+    .record({ functions: fc.dictionary(anyKey, capabilities, { maxKeys: 6, noNullPrototype: true }), unsafe: fc.dictionary(anyKey, fc.string(), { maxKeys: 3, noNullPrototype: true }) })
+    .map((l) => ({ permlang: 2, ...l }));
+  const ownEntries = <T>(r: Record<string, T>) => Object.keys(r).map((k) => [k, Object.getOwnPropertyDescriptor(r, k)!.value as T] as const);
 
   it("reads back what it writes, and writes it byte for byte the same", () => {
     fc.assert(
       fc.property(lock, (l) => {
         const read = parseLock(serializeLock(l), "permlang.lock.json");
-        const sorted = Object.fromEntries(Object.entries(l.functions).map(([k, caps]) => [k, [...caps].sort()]));
-        expect(read).toEqual({ permlang: 1, functions: sorted, unsafe: { ...l.unsafe } });
+        expect(read.permlang).toBe(2);
+        expect(ownEntries(read.functions)).toEqual(ownEntries(l.functions).map(([k, caps]) => [k, [...caps].sort()]).sort(([a], [b]) => (a < b ? -1 : 1)));
+        expect(ownEntries(read.unsafe).sort()).toEqual([...ownEntries(l.unsafe)].sort());
         expect(serializeLock(parseLock(serializeLock(read), "permlang.lock.json"))).toBe(serializeLock(read));
       }),
     );
@@ -347,17 +375,90 @@ describe("lock file", () => {
   it("diffs: a lock has no changes against itself, and the diff turns one lock into the other", () => {
     fc.assert(
       fc.property(lock, lock, (a, b) => {
-        expect(diffLocks(a, a)).toEqual({ functions: [], unsafeAdded: [], unsafeRemoved: [] });
+        expect(diffLocks(a, a)).toEqual({ functions: [], unsafeAdded: [], unsafeRemoved: [], unsafeChanged: [] });
         const diff = diffLocks(a, b);
+        const own = (r: Record<string, string[]>, k: string) => (Object.hasOwn(r, k) ? r[k]! : []);
         for (const k of new Set([...Object.keys(a.functions), ...Object.keys(b.functions)])) {
           const change = diff.functions.find((c) => c.key === k);
-          const before = [...new Set(a.functions[k] ?? [])];
+          const before = [...new Set(own(a.functions, k))];
           const after = change ? [...before.filter((c) => !change.removed.includes(c)), ...change.added] : before;
-          expect(after.sort()).toEqual([...new Set(b.functions[k] ?? [])].sort());
+          expect(after.sort()).toEqual([...new Set(own(b.functions, k))].sort());
         }
         const back = diffLocks(b, a);
         expect(back.functions.map((c) => [c.key, c.added, c.removed])).toEqual(diff.functions.map((c) => [c.key, c.removed, c.added]));
         expect(back.unsafeAdded.map((u) => u.key).sort()).toEqual(diff.unsafeRemoved.map((u) => u.key).sort());
+        expect(back.unsafeChanged.map((u) => [u.key, u.before, u.after])).toEqual(diff.unsafeChanged.map((u) => [u.key, u.after, u.before]));
+      }),
+    );
+  });
+});
+
+// --- The pull-request comment -----------------------------------------------------------
+
+describe("the permission diff comment", () => {
+  const name = fc.oneof(fc.stringMatching(/^[A-Za-z_$][\w$]{0,30}$/), hostile);
+  const change = fc.record({
+    file: fc.stringMatching(/^[a-z0-9/._-]{1,20}$/),
+    name,
+    added: fc.uniqueArray(fc.oneof(fc.constantFrom("net", "exec", "env(HOME)", "net(api.example.com)"), hostile), { minLength: 1, maxLength: 4 }),
+  });
+  const diff = fc
+    .record({
+      changes: fc.array(change, { maxLength: 40 }),
+      reasons: fc.array(hostile, { maxLength: 3 }),
+    })
+    .map(({ changes, reasons }) => ({
+      functions: changes.map((c, i) => ({ key: `${c.file}#${c.name}#${i + 2}`, file: c.file, name: c.name, status: "changed" as const, added: c.added, removed: [] })),
+      unsafeAdded: reasons.map((reason, i) => ({ key: `src/u.ts#f#${i + 2}`, reason })),
+      unsafeRemoved: [],
+      unsafeChanged: [],
+    }));
+  const limit = fc.integer({ min: 2_000, max: 20_000 });
+
+  it("never exceeds the size limit, and always keeps its marker, heading, and footer", () => {
+    fc.assert(
+      fc.property(diff, limit, (d, max) => {
+        const md = formatDiffMarkdown(d, {}, { marker: "<!-- permlang-diff -->" }, max);
+        expect(Buffer.byteLength(md, "utf8")).toBeLessThanOrEqual(max);
+        expect(md.startsWith("<!-- permlang-diff -->\n### PermLang permission diff")).toBe(true);
+        if (d.functions.length > 0) expect(md).toContain("Approving this change approves the access above");
+      }),
+    );
+  });
+
+  it("keeps the table of new access before anything else, cut short with a note", () => {
+    const many = { functions: Array.from({ length: 3_000 }, (_, i) => ({ key: `src/f${i}.ts#f`, file: `src/f${i}.ts`, name: "f", status: "changed" as const, added: [`net(host${i}.example)`], removed: [] })), unsafeAdded: [], unsafeRemoved: [], unsafeChanged: [] };
+    const md = formatDiffMarkdown(many, {}, {});
+    expect(Buffer.byteLength(md, "utf8")).toBeLessThanOrEqual(COMMENT_LIMIT);
+    expect(md).toContain("| New access | Where it happens | Now reachable from |");
+    expect(md).toMatch(/\*\*Cut short\*\* to fit GitHub's limit on comment length: \d+ more lines aren't shown/);
+  });
+
+  it("can't be made to mention people, link issues, or show emoji by text from the code", () => {
+    const sneaky = fc.constantFrom("@octocat", "@org/team", "#12", "owner/repo#3", "GH-4", "https://evil.example", "www.evil.example", ":tada:", "a5c3785ed8d6a35868bc169f07e40e889087fd2e", "~~gone~~", "$x$");
+    fc.assert(
+      fc.property(fc.array(fc.oneof(sneaky, hostile), { minLength: 1, maxLength: 4 }), (parts) => {
+        const text = parts.join(" ");
+        const md = formatDiffMarkdown({ functions: [{ key: "src/a.ts#f", file: "src/a.ts", name: "f", status: "changed", added: ["net"], removed: [] }], unsafeAdded: [{ key: "src/a.ts#f", reason: text }], unsafeRemoved: [], unsafeChanged: [] }, { "src/a.ts#f": { net: ["f", text] } });
+        // Outside code formatting, where GitHub links and notifies.
+        const outside = md.replace(/<code>.*?<\/code>/g, "");
+        // Markdown syntax (strikethrough, math) is read from the source: it must be escaped there.
+        expect(outside.replace(/&#?\w+;/g, "")).not.toMatch(/~~|\$/);
+        // Mentions, references, and links are found in the rendered text, after entities are decoded.
+        const decoded = outside.replace(/&#(\d+);/g, (_, n: string) => String.fromCodePoint(Number(n))).replace(/&\w+;/g, " ");
+        expect(decoded).not.toMatch(/@\w|#\d|\bgh-\d|:\/\/|\bwww\.|:\w+:|\b[0-9a-f]{7,}\b/i);
+      }),
+    );
+  });
+});
+
+describe("printable text", () => {
+  it("never contains a line break or a control character, and leaves other text alone", () => {
+    fc.assert(
+      fc.property(fc.oneof(hostile, fc.string({ unit: "grapheme" })), (t) => {
+        const p = printable(t);
+        expect(p).not.toMatch(/[\x00-\x1f\x7f-\x9f\u{2028}\u{2029}\u{202a}-\u{202e}\u{2066}-\u{2069}]/u);
+        if (!/[\x00-\x1f\x7f-\x9f\u{2028}\u{2029}\u{202a}-\u{202e}\u{2066}-\u{2069}]/u.test(t)) expect(p).toBe(t);
       }),
     );
   });

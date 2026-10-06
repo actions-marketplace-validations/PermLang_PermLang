@@ -27,7 +27,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Node } from "ts-morph";
 import { BUILTIN_VOCABULARY, CAPABILITY_NAME, UNVERIFIABLE, parsePermList, type Capability } from "./capability.js";
-import { containerName, hostOf, literalString } from "./detect/shared.js";
+import { containerName, hostOf, literalString, nodeRequestHost, nodeSocketHost } from "./detect/shared.js";
 
 interface Template {
   name: string;
@@ -202,41 +202,29 @@ export class AdapterIndex {
   forDeclaration(declaration: Node, args: readonly Node[]): Capability[] {
     const pkg = packageOf(declaration);
     const adapters = pkg === undefined ? undefined : this.byPackage.get(pkg);
-    if (!adapters) return [];
+    if (pkg === undefined || !adapters) return [];
 
     const key = functionKey(declaration);
     const listed = key === undefined ? undefined : adapters.find((a) => a.functions.has(key))?.functions.get(key);
     const isConstructor = Node.isConstructorDeclaration(declaration) || Node.isConstructSignatureDeclaration(declaration);
     const templates = listed ?? (isConstructor ? undefined : adapters.find((a) => a.default)?.default);
-    return (templates ?? []).flatMap((t) => (typeof t.arg === "object" && t.arg.optional ? configHost(t.name, args[t.arg.index]) : [instantiate(t, args)]));
+    return (templates ?? []).flatMap((t) => (typeof t.arg === "object" && t.arg.optional ? configHost(t.name, args[t.arg.index]) : [instantiate(t, args, pkg)]));
   }
 }
 
-function instantiate(t: Template, args: readonly Node[]): Capability {
+// Node's net and tls connect to an options object's `host`, not its `hostname`.
+const NODE_SOCKET_PACKAGES = new Set(["net", "tls"]);
+
+function instantiate(t: Template, args: readonly Node[], pkg: string): Capability {
   if (t.arg === undefined || typeof t.arg === "string") return t.arg === undefined ? { name: t.name } : { name: t.name, arg: t.arg };
-  const arg = args[t.arg.index];
-  let value = t.arg.kind === "host" ? hostOf(arg) : literalString(arg);
-  // {host:N+}: a later options argument can replace the host, as in Node's
-  // http.request(url, { hostname }). Options that might carry one make it unknown.
-  if (t.arg.overridable) {
-    for (const later of args.slice(t.arg.index + 1)) {
-      const override = hostOverride(later);
-      if (override !== null) value = override;
-    }
-  }
+  const { kind, index } = t.arg;
+  // {host:N+}: Node's http.request(url, options), where options can replace the URL's host.
+  const value =
+    kind === "arg" ? literalString(args[index])
+    : t.arg.overridable ? nodeRequestHost(args, index)
+    : NODE_SOCKET_PACKAGES.has(pkg) ? nodeSocketHost(args, index)
+    : hostOf(args[index]);
   return value === undefined ? { name: t.name, dynamic: true } : { name: t.name, arg: value };
-}
-
-/** The host an options argument sets: a string; undefined if it may set one that can't be known; null if it can't set one. */
-function hostOverride(arg: Node): string | undefined | null {
-  if (arg.getType().getCallSignatures().length > 0) return null; // a callback
-  if (!Node.isObjectLiteralExpression(arg)) return arg.getType().isObject() ? undefined : null;
-  if (arg.getProperties().some((p) => Node.isSpreadAssignment(p))) return undefined;
-  const setsHost = arg.getProperties().some((p) => {
-    const name = "getName" in p ? (p as { getName(): string }).getName() : undefined;
-    return name === "hostname" || name === "host" || name === "url";
-  });
-  return setsHost ? hostOf(arg) : null;
 }
 
 /** The package a declaration belongs to: an ambient `declare module "x"`, else its node_modules folder. */

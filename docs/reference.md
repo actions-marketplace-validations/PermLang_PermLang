@@ -7,7 +7,12 @@ it can't see yet. New here? Start with [getting started](getting-started.md).
 ## What it checks
 
 - **Annotations.** `@perm` tags in JSDoc on functions, methods, constructors,
-  accessors, and function-valued `const`s and properties.
+  accessors, function-valued `const`s and properties (in classes and in object
+  literals), `export default` functions, and a class with no constructor (the tag
+  covers its implicit one: field initializers and the base constructor). An
+  overloaded function's tag can sit on any signature. A `@perm` or `@perm-unsafe`
+  anywhere else (an interface member, a variable that isn't a function, a class
+  with a constructor, a statement) applies to nothing, and is an error (PERM002).
 - **Direct calls.** The global `fetch` and Node's `fs` / `fs/promises`
   (including `node:` imports, renamed imports, and `fs.promises.*`).
 - **Propagation.** A function's actual permissions include everything its
@@ -31,19 +36,53 @@ it can't see yet. New here? Start with [getting started](getting-started.md).
    */
   ```
 
+  The one-line form works too: `/** @module @perm net(api.stripe.com) */`.
+
 - **Missing annotations.** At the default strictness, an exported function
-  with no `@perm` is an error (PERM003) for each capability it reaches. Private
-  helpers need no annotation; their callers must cover what they use. See
-  [Strictness levels](#strictness-levels).
+  or entry point with no `@perm` is an error (PERM003) for each capability it
+  reaches. Private helpers need no annotation; their callers must cover what they
+  use. See [exported functions and entry points](#exported-functions-and-entry-points)
+  and [Strictness levels](#strictness-levels). Each suggested fix names a place
+  the annotation attaches to: a `/** @module @perm ... */` comment for a file's
+  top-level code, the class for an implicit constructor.
 - **All v0.1 capabilities.**
   - `env`: any expression typed `NodeJS.ProcessEnv`, so `process.env.KEY`,
     `process.env["KEY"]`, destructuring, `"KEY" in process.env`, and aliases
     (`const env = process.env; env.KEY`). Spreading or enumerating the
-    environment needs bare `env`.
+    environment needs bare `env`. `process.env` (and `(process as any).env`) is
+    read the same way without Node's types, or with a project's own
+    `declare const process`; a `process`
+    that doesn't resolve also gets a PERM007 warning, since its other APIs
+    can't be checked. `import.meta.env.KEY` (Vite, Astro, and others) is
+    `env(KEY)`, except what Vite sets itself (`MODE`, `DEV`, `PROD`, `SSR`,
+    `BASE_URL`). `process.loadEnvFile(path)` needs `env` and `fs.read(path)`
+    (`./.env` by default).
   - `exec`: `child_process` (`exec`, `execFile`, `spawn`, `fork`, and their
-    `Sync` forms).
-  - `net`: also `http`, `https`, `http2`, `net`, and `tls` (host from a URL or
-    from an options object's `hostname` / `host`).
+    `Sync` forms), `process.kill`, `process.execve`, and `cluster.fork` /
+    `setupPrimary`.
+  - `net`: also `http`, `https`, `http2`, `net`, `tls`, `WebSocket`,
+    `EventSource`, `WebTransport`, `navigator.sendBeacon`, and
+    `XMLHttpRequest`. The host comes from a URL, or from an options object the
+    way Node reads it: the `http` family connects to `hostname` before `host`
+    and ignores a `url` option; after a URL, an options `hostname` replaces the
+    URL's host but a `host` doesn't (Node's URL parsing sets `hostname`); `net`
+    and `tls` connect to `host` (or `connect(port, host)`) and ignore
+    `hostname`. Other libraries' options must name one host in all of `url`,
+    `hostname`, and `host`. A spread, an accessor, a computed key, or a
+    `socketPath`, `lookup`, or `createConnection` option (or a `path` for `net`
+    and `tls`) could send the connection anywhere, so it needs bare `net`. So do
+    options that aren't written out where they're used (a variable, even one that
+    may be `undefined`), and a first argument to `net.connect` or `tls.connect`
+    that isn't a port number or written-out options.
+  - `fs.read` / `fs.write`: `readFile` and `createReadStream` with a writing
+    `flag` / `flags` option (`"w"`, `"a+"`, or one that can't be read) write the
+    file, and used as values they could be called with any flags, as `open` can.
+    `new fs.Utf8Stream({ dest })`, `ReadStream`, and `WriteStream` open their
+    path. `fchmod`, `fchown`, and `futimes` (and a `FileHandle`'s `chmod`,
+    `chown`, and `utimes`) change a file however it was opened, so they need
+    `fs.write`. `process.chdir(dir)` needs `fs.read(dir)` and `fs.write(dir)`,
+    because every relative path the program uses afterwards resolves inside
+    `dir`.
   - `db`: **Prisma**. The table is the
     model's accessor name: `prisma.lead.create()` needs `db.write(lead)`. Raw
     SQL (`$queryRaw`, `$executeRaw`, ...) needs bare `db.read` and `db.write`.
@@ -115,22 +154,46 @@ it can't see yet. New here? Start with [getting started](getting-started.md).
   what the function reaches.
 - **Adversarial coverage.** Tricks that try to hide access are caught:
   - capability functions used as values: `urls.map(fetch)`, `promisify(exec)`,
-    `paths.forEach(unlinkSync)`, `send.call(...)` (a `const` alias is fine,
-    because calls through it resolve to the original);
+    `paths.forEach(unlinkSync)`, `{ fetch }`. `send.call(thisArg, url)` and
+    `send.apply(thisArg, [url])` are checked as calls, with their arguments. Calls
+    through a `const` alias resolve to the original; the alias used as a value
+    (`const run = execSync; run.call(null, cmd)`, `Reflect.apply(run, ...)`,
+    `urls.map(get)` with `const get = fetch`) is a use of what it holds. Testing
+    whether a function exists (`if (globalThis.fetch)`, `!WebSocket`,
+    `x instanceof WebSocket`, `if (ready && window.WebSocket)`) isn't a use, but
+    picking one with `&&`, `||`, or `??` outside a condition
+    (`const WS = window.WebSocket || Fallback`) is;
+  - capability classes reached indirectly: through an alias
+    (`const WS = WebSocket`), a subclass, `super(url)`, a `typeof WebSocket`
+    parameter, or `Reflect.construct(WebSocket, ...)`;
+  - browser APIs in indirect forms: `navigator.sendBeacon.call(...)`,
+    `XMLHttpRequest.prototype.open.call(...)`, `window.setTimeout("code")`;
   - calls through an interface or base class, which reach every first-party
-    implementation, including object literals written against the type;
-  - `super()`, implicit constructors, and instance field initializers;
+    implementation (see [how calls are followed](#how-calls-are-followed));
+  - `super()`, implicit constructors, instance field initializers, classes built
+    by expressions, and mixins;
   - `{ helper }` shorthand, getters, and literal computed keys (`api["ping"]()`);
   - computed keys over a known object (`handlers[kind]()`), which reach every
     member the key allows;
-  - importing a module, which runs its top-level code (static and literal
-    `import()`).
+  - methods the language calls without a visible call (`await`, `for...of`,
+    spreading, destructuring, arithmetic and comparisons, `using`, `instanceof`);
+  - importing a module, which runs its top-level code (`import`, `export ... from`,
+    `import x = require()`, `require()`, and `import()`, including one whose
+    specifier is a `const`, an `as const` property, or an enum member).
 - **Unverifiable code (PERM004).** Code whose effects can't be determined is
   an error in annotated functions: `eval`, `new Function`, `setTimeout("code")`,
-  `require()`, `import(variable)`, `vm`, `new Worker`, and computed calls on
-  sensitive objects (`fs[method]()`, `globalThis[name]()`) or behind an index
-  signature (`table[name]()`). The only way to accept it is `@perm-unsafe`,
-  which also stops it from failing the function's callers.
+  `vm`, `new Worker` (Node's, and the browser's `Worker`, `SharedWorker`, and
+  `importScripts()`), native code and hooks (`process.dlopen`,
+  `crypto.setEngine`, `module.register`, `registerHooks`, `runMain`,
+  `module.require`, `new Module()`), the inspector's `Session.post`,
+  `process.binding()`, `process.getBuiltinModule(name)` with a computed name (a
+  literal name is like importing the module), computed calls on sensitive
+  objects (`fs[method]()`, `globalThis[name]()`) or behind an index signature
+  (`table[name]()`), loading a module whose result can't be checked (see
+  [loading modules](#loading-modules)), calls into the project's own JavaScript
+  through a hand-written `.d.ts`, and a file PermLang couldn't analyze (code
+  nested thousands of levels deep, say). The only way to accept it is
+  `@perm-unsafe`, which also stops it from failing the function's callers.
 - **Project configuration (PERM005).** GitHub workflows, Actions, and
   `package.json` scripts are recorded in the lock like code: token permissions,
   secrets, Actions and whether they're pinned, install hooks. See
@@ -146,6 +209,85 @@ it can't see yet. New here? Start with [getting started](getting-started.md).
   GitHub Action with line annotations and code scanning, and SARIF output.** See
   below.
 
+### How calls are followed
+
+A function reaches everything the functions it can run reach. PermLang links
+them by what the code says, not by names:
+
+- **Calls and references.** A call links to the declaration it resolves to. So
+  does passing a function on (`urls.map(handler)`, `setTimeout(handler)`): the
+  receiver can call it.
+- **Interfaces and base classes.** A call or read through an interface, a type
+  alias, or a base class (`s.send(u)`, `urls.map(s.send)`, `s.send.call(...)`,
+  `this.url` for a getter) reaches every first-party implementation: classes
+  that extend or implement the type, object literals written against it, and,
+  for an interface or object type, any class or object literal in the project
+  that could be used as one, since TypeScript doesn't require `implements`. A
+  generic type is compared by the members it requires. Members declared as
+  function-typed properties (`send: (u: string) => void`) count like methods.
+- **Objects of functions handed to a call.** A function that passes an object
+  holding functions (`app.use({ run(q) {...} })`, or a `const` holding one,
+  nested in arrays and objects too) reaches those functions. Handed out by a
+  file's top-level code, they're entry points instead (see below).
+- **Implicit calls.** `await x` runs `then`; `for...of`, spreading an array,
+  array destructuring and `yield*` run the iterator; template literals,
+  arithmetic, comparisons, `==`, compound assignment, and unary `+` `-` `~`
+  `++` `--` on an object run `valueOf` / `toString` / `[Symbol.toPrimitive]`;
+  destructuring (including quoted, numeric, and computed keys, and
+  `({ a } = b)`) and `{ ...b }` run getters; `using` and `await using` run
+  `[Symbol.dispose]` / `[Symbol.asyncDispose]`; `instanceof` runs the class's
+  static `[Symbol.hasInstance]`.
+- **Classes.** `new` runs the constructor, or the implicit one (field
+  initializers and the base constructor). A class built by an expression
+  (returned from a function, a mixin, `new (class {...})()`) is found through
+  the type of what's constructed, and named after where it's built
+  (`make.<class>.constructor`).
+- **Decorators.** A class decorator (`@logged` or `@logged()`) runs with the
+  code that defines the class. A member's decorator is charged to the member.
+- **Recursion.** Functions that call each other reach what any of them does.
+
+Paths in messages keep their first 20 steps and their last 3.
+
+### Exported functions and entry points
+
+At the default strictness, these must declare what they reach:
+
+- exported functions, classes and their members, and members of exported
+  namespaces (`namespace A.B` too);
+- functions in an exported object or array, at any depth
+  (`export const api = { v1: { run() {} } }`, `export const routes = [{ handler }]`,
+  a static field of an exported class), and `export default {...}` /
+  `export = {...}` / `export = run`;
+- members of an object a function returns or hands out, if that function is
+  exported;
+- functions that top-level code hands to a call inside an object: route tables
+  (`app.route({ handler(q) {...} })`), plugin hooks
+  (`defineConfig({ plugins: [{ buildStart() {...} }] })`), AI tool definitions,
+  `Proxy` handlers;
+- the file's top-level code, which runs on import. It also reaches any function
+  it passes on: `export default withAuth(handler)` or
+  `export default { fetch: handler }` reaches `handler`.
+
+### Loading modules
+
+`import`, `export ... from`, `import x = require()`, and `import()` with a literal
+specifier are typed by TypeScript, so calls on what they load are checked like
+any others. `require()` in TypeScript, and `import()` with a specifier that isn't
+written as a literal, give `any`. PermLang traces the specifier (a literal, a
+`const`, an `as const` property, an enum member) and goes by what it names:
+
+| Loaded | Result |
+| --- | --- |
+| a file in the project | its top-level code runs, and any of its exports can be called: the caller reaches all of them |
+| a module whose functions carry capabilities (`child_process`, `fs`, a Node built-in that isn't declared pure, a database client, a package an adapter maps) | unverifiable |
+| a package with no adapter | listed and warned about (PERM006), like an import of it |
+| a package declared pure, JSON, or another asset | nothing |
+| a specifier that can't be traced, or a file outside the project | unverifiable |
+
+`data:`, `http:`, `https:`, `blob:` and `file:` specifiers are unverifiable in
+every form of import: the code isn't a file in the project. A query or fragment
+doesn't make a script an asset (`./evil.js?x=.css` is still `./evil.js`).
+
 ### Known limits
 
 The aim is to catch the whole adversarial suite, or to document each miss. These misses are documented as fixtures in
@@ -159,37 +301,111 @@ so the list can't go stale.
   with known capabilities becomes `any`, the escape itself is checked:
   - A member read off a cast is looked up on the original type and reported as
     the access it is: `(globalThis as any).fetch(url)`,
-    `(childProcess as any)["exec"](cmd)`, `(process as any).env.KEY`. Casts to
-    `Record<string, any>` and through `unknown` count too.
-  - A capability module that escapes any other way (stored, passed, or returned as
-    `any`, or read with a computed key) is unverifiable (PERM004).
+    `(childProcess as any)["exec"](cmd)`, `(process as any).env.KEY`,
+    `(globalThis.process as any).env.KEY`, and down a chain of members
+    (`(window as any).navigator.sendBeacon(url)`) or into a constructor
+    (`new (globalThis as any).WebSocket(url)`). Casts to `Record<string, any>`
+    and through `unknown` count too.
+  - A capability module is any value whose type is one: a namespace or default
+    import, `import cp = require(...)`, the result of `await import(...)` or
+    `process.getBuiltinModule(...)`, or a module of the project's own that
+    re-exports one. One that escapes any other way (stored, passed, or returned
+    as `any`; passed on as `unknown`, `object`, `{}`, or a record such as
+    `Record<string, unknown>`; listed with `Object.values`, `entries`, or
+    `keys`; read or written with a computed key, also by `Reflect.get`; or
+    given to a callback parameter typed `any` or `unknown`, as in
+    `Promise.resolve(cp).then((m: any) => ...)`; or given as `this` to a function
+    of the project's own, as in `run.call(cp)`) is unverifiable (PERM004).
+    Passed to a parameter of its own type (`function run(m: typeof cp)`), it's
+    checked through that parameter like the module itself.
   - `const f: any = fetch` counts as using `fetch`, and `declare const require: any`
     and `(require as any)(...)` are still `require`.
 
   Two things stay unchecked. A global object stored as `any`
   (`const w = window as any; w.fetch(url)`) isn't followed: that cast is common
   and almost always harmless, so it isn't reported. And a value that was `any`
-  from the start, such as an untyped parameter, has nothing to trace. Imports
+  from the start, such as an untyped parameter, has nothing to trace; that
+  includes a module handed through a promise or a collection to a named
+  function whose parameter is `any` (`Promise.resolve(cp).then(handle)`, with
+  `function handle(m: any)`), since only callbacks written in place are
+  matched to what they're given. A module that's passed on from somewhere other
+  than its own name (an array element or an object's property, as in
+  `use(modules[0])`) isn't followed either. Imports
   whose types can't be found, including packages shimmed with
   `declare module "x";`, are reported (PERM007), whether reached by `import`,
   `import x = require()`, or a literal `import()`.
-- `Proxy` traps, which can return a capability function for any property.
+- `Proxy` traps, which can return a capability function for any property. A
+  handler's traps are entry points (or charged to the function creating the
+  `Proxy`), but a call through the `Proxy` isn't linked to them.
 - Functions attached after the fact (`obj.m = fn`, reassigning a `let`) aren't
   linked to calls through that property or variable. The top-level code that
   assigns them is still reported.
 - Implicit calls made inside a library function: `Promise.resolve(x)` calling
   `then`, `Array.from(x)` running an iterator, `String(x)` calling `toString`.
   Written directly (`await x`, `for...of`, `${x}`, `"" + x`), they're caught.
+- `as const` objects and enum members are trusted as fixed values, though code
+  can change them at runtime. Every reference to one is checked for a write (an
+  assignment, `delete`, `++`, or destructuring into a member; a cast; or
+  `Object.assign`, `Object.defineProperty`, `Reflect.set`, and the like with it
+  as the target), and values read from a written object are unknown. An object
+  passed to a function that writes to it, or stored in another variable first,
+  isn't followed ([`fixtures/m6/limits/constant-written-elsewhere.ts`](../fixtures/m6/limits/constant-written-elsewhere.ts)).
+  Treating every such value as unknown instead would turn most uses of
+  constants into bare capabilities.
 
 Other gaps, not yet in fixtures:
 
 - Third-party packages without an adapter: what they touch is trusted. They are
   listed in every report and warned about (PERM006; see below).
 - A `ProcessEnv` received as a parameter typed as a plain object.
-- A decorator's arguments run when the class is defined, but are charged to the
-  decorated member.
+- The browser loading a resource for the page (an image's `src`, a script or
+  stylesheet element, a CSS `url()`) or leaving it (`location.href = url`,
+  `window.open(url)`, a form submission), which reaches the network without a
+  network API call.
+- Calling a method on an object Node's built-ins return isn't new access:
+  `socket.write()` after `net.connect()`, `child.kill()` after `spawn()`. The
+  access is checked where the object was made, so an object made somewhere
+  PermLang can't see (a `ChildProcess` constructed directly and spawned through
+  its undocumented `spawn` method, say) isn't reported.
+- A member's decorator, and a decorator's arguments, run when the class is
+  defined, but are charged to the decorated member. So at the default
+  strictness, a member decorator on a class that isn't exported isn't checked.
+- JavaScript behind the project's own hand-written `.d.ts` isn't analyzed: calls
+  into it are unverifiable, but importing it (which runs its top-level code) isn't
+  reported, and neither is reading a property it declares. To have it checked,
+  convert it to TypeScript; PermLang doesn't analyze the `.js` even with
+  `allowJs`, as long as the `.d.ts` describes it. Declarations that describe the
+  runtime (`declare global`, a `.d.ts` with no imports or exports) or a package
+  (`declare module "x"`, a folder with its own `package.json`, such as a
+  generated Prisma client) are trusted like a package with no adapter.
+- `require()` of a package an adapter maps is unverifiable, rather than reaching
+  the capabilities the adapter lists; use `import` to have its calls checked.
+- A file loaded with `require()` or a traced `import()` reaches every export of
+  that file, used or not.
+- Interfaces are matched structurally, so a class or object literal that merely
+  fits an interface counts as an implementation of it, even if it's never used
+  as one.
+- A file that TypeScript itself can't parse (code nested thousands of levels
+  deep) is unverifiable when the project's file list includes it. One reached
+  only through imports from outside that list still stops the check.
 - Lock keys for same-named functions in one file (`#2`, `#3`) follow source
   order, so adding one can renumber the others and show spurious lock changes.
+- The Action knows whether the lock file existed before only on pull requests
+  and merge-queue entries, from their base commit. On a push, a deleted lock
+  file isn't detected.
+- A pull request that changes the Action's `args` to use a new `--lock` file,
+  one the base commit doesn't have, isn't held to the old one: the check uses
+  the new file, and the comment lists all access as new and says the base has
+  no lock file.
+- New dependencies are described with the pull request's own adapters. An
+  adapter the pull request adds or changes is itself a settings change, which
+  fails the check and is listed in the comment.
+- Of tsconfig.json's compiler options, only those that decide which files are
+  read and what imports and globals resolve to are recorded (see
+  [what the lock records](#what-the-lock-records)).
+- If the Action can't look up the account its token belongs to, it assumes
+  `github-actions[bot]`; with another kind of token, it then adds a new comment
+  on each push instead of updating one.
 - Databases run code of their own that SQL text doesn't show: triggers, views,
   rules, and row-level security can read or write other tables.
 - Table names in SQL are reported as written. Postgres folds unquoted names to
@@ -226,17 +442,25 @@ Other gaps, not yet in fixtures:
 | `adapters` | paths | Your own adapter manifests, relative to the config file. See [adapter manifests](#adapter-manifests). |
 | `flows` | rules | Where protected data may go. See [data-flow rules](#data-flow-rules). |
 
+Any other key is an error (exit code 2) that names it, since a typo such as
+`"strictnes"` would otherwise leave the default in place unseen. `"$schema"` is
+allowed.
+
+The settings in effect, after command-line options, are recorded in the lock
+file along with the paths checked, so changing them fails the check until
+`permlang lock` records the change. See [what the lock records](#what-the-lock-records).
+
 ## Diagnostic codes
 
 | Code | Severity | Meaning |
 | --- | --- | --- |
 | `PERM001` | error | A function reaches a capability its `@perm` doesn't declare. |
-| `PERM002` | error | An `@perm` annotation is invalid. |
+| `PERM002` | error | An `@perm` annotation is invalid, or attaches to nothing. |
 | `PERM003` | error | A function that must declare its permissions has no `@perm`: exported functions at development, every function at production. See [strictness levels](#strictness-levels). |
 | `PERM004` | error | Code whose effects can't be determined statically, such as `eval` or a capability hidden behind `any`. |
-| `PERM005` | error, or warning when access was removed | The code reaches something `permlang.lock.json` doesn't record, or no longer reaches something it does. |
+| `PERM005` | error | The code and `permlang.lock.json` differ: the code reaches something the lock doesn't record, or the lock records something the code no longer reaches; a `@perm-unsafe` override is new, gone, or has another reason; the check ran on other files or with other settings than the lock records; the lock is missing (with `--require-lock`); or an older PermLang wrote it. See [the lock file](#the-lock-file-and-the-permission-diff). |
 | `PERM006` | warning, by default | A call into a package with no adapter: what it touches isn't checked. See [packages without an adapter](#packages-without-an-adapter). |
-| `PERM007` | warning, by default | An import whose types can't be found, so nothing called from it is checked. |
+| `PERM007` | warning, by default | An import whose types can't be found, so nothing called from it is checked. Also the global `process` when Node's types are missing (reported as `node:process`). |
 | `PERM008` | warning, by default | A tool an AI model can call reaches something dangerous. See [tools given to AI models](#tools-given-to-ai-models). |
 | `PERM009` | error | A function gets hold of data a flow rule protects and can send it somewhere the rule doesn't allow: another host, a command, or code that can't be verified. See [data-flow rules](#data-flow-rules). |
 | `SPEC001`–`SPEC005` | error or warning | Problems with `.perm` specs: see [specs](#specs-phase-2-groundwork). |
@@ -260,6 +484,15 @@ Wildcards (`*`) are not allowed. A capability without an argument (`net`,
 `fs.read`) allows any scope. It is required when the host or path can't be
 determined statically, for example `fetch(url)` or a template path like
 `` `./data/${name}` ``.
+
+Paths match whole folders after `..` is resolved: `fs.read(./data)` covers
+`./data/a.json` but not `./database.json` or `./data/../x`. A path only matches
+paths under the same root. A relative path never matches an absolute one, since
+where it lands depends on where the program runs. On Windows, a drive (`C:\`), a
+network share (`\\server\share`), and a drive-relative path (`C:x`, which is
+relative to drive C's own working directory) are each separate roots, so
+`fs.write(/evil)` doesn't cover `\\evil\share\x`, and `fs.read(.)` doesn't cover
+`C:..\x`. Drive letters match in any case.
 
 ## Data-flow rules
 
@@ -436,8 +669,9 @@ Each file is an entry in the lock, keyed by its path (for example
 | `ci.unverifiable(sha256:…)`, `npm.unverifiable(sha256:…)` | A file, or part of one, PermLang can't read: YAML that doesn't parse, a workflow without both `on:` and `jobs:` (GitHub wouldn't run it as written, and stray invisible characters can make PermLang and GitHub read it differently), an alias with no anchor before it, an image named by an expression, a link that leads nowhere. It's recorded rather than skipped, so it can't hide anything, with the file's SHA-256, so that any edit to the file changes the lock and shows in review. Line endings and a byte-order mark don't count, since Git can change them on checkout. |
 
 A change that adds one fails the check (`PERM005`) at the line that grants it,
-and shows in the pull-request comment, until `permlang lock` records it. That's
-the same review gate as for code. Updating a pinned Action to a new commit
+and shows in the pull-request comment, until `permlang lock` records it. So does
+a change that removes one, or a lock that records one the files don't grant.
+That's the same review gate as for code. Updating a pinned Action to a new commit
 doesn't change the lock, but switching it to a tag does.
 
 ### How workflows are read
@@ -503,17 +737,14 @@ that isn't plain JSON is unverifiable.
 - Actions and reusable workflows from other repositories aren't read; pinning them
   to a commit is what keeps them from changing.
 
-**Upgrading from 0.2:** a lock written before 0.3 records no configuration. The
-first check after upgrading reports each entry as a warning instead of failing,
-and `permlang lock` records them.
-
-**Upgrading to 0.4:** PermLang now reads configuration it missed before (aliases,
-secrets written other ways, local Actions, images, workspace packages), names
-secrets in upper case, and adds a hash to unverifiable entries. The first check
-after upgrading can report these as new access; review them, then run
-`permlang lock`. Secrets mentioned outside an expression, and `uses:` keys that
-aren't steps or jobs, are no longer recorded; the check warns that the lock still
-records them until it's updated.
+**Upgrading from 0.3 or earlier:** there's no grace period. A lock written
+before 0.4 fails the check with one error until `permlang lock` rewrites it; see
+[upgrading the lock](#upgrading-from-03-or-earlier). 0.4 also reads configuration
+it missed before (aliases, secrets written other ways, local Actions, images,
+workspace packages), names secrets in upper case, adds a hash to unverifiable
+entries, and no longer records secrets mentioned outside an expression or `uses:`
+keys that aren't steps or jobs. So the rewritten lock can differ from the old one
+here too: review the change before committing it.
 
 ## Adapter manifests
 
@@ -536,8 +767,20 @@ argument N:
 }
 ```
 
+`{host:N}` reads a URL, a template with a literal host, `new URL(...)`, or an
+options object whose `url`, `hostname`, and `host` all name the same host (for
+the `net` and `tls` modules, the options' `host`, as Node reads it). A spread,
+an accessor, a computed key, or a `socketPath`, `lookup`, or `createConnection`
+option makes it unknown. `{host:N+}` reads argument N the way Node's
+`http.request(input, options)` does: `hostname` before `host`, no `url` option,
+and an options argument after a URL can replace its host with `hostname`. A
+placeholder that can't be read gives the bare capability, so the call needs,
+say, `net`.
+
 `default` applies to every other method in the package (not constructors). An
-empty list maps a function to nothing. Add your own adapters in
+empty list maps a function to nothing. Keys must match how the package's types
+declare the function: `process.kill` is declared on the `Process` interface, so
+its key is `Process.kill`, not `kill`. Add your own adapters in
 `permlang.config.json`; they take precedence over the built-in ones:
 
 ```json
@@ -572,7 +815,10 @@ Node's pure built-ins and common libraries (zod, date-fns, React, ...).
 Built-in adapters cover axios, Stripe, nodemailer, `node-fetch`, `undici`, Redis
 (`redis`, `ioredis`), Kafka, Bull/BullMQ, ClickHouse, AI SDKs (`ai`, `openai`,
 `@anthropic-ai/sdk`, ...), MCP clients, several web APIs, `@nestjs/config`,
-`maxmind`, `tar`, and the Node modules that carry capabilities. Where an
+`maxmind`, `tar`, and the Node modules that carry capabilities (`process`,
+`cluster`, `inspector`, `module`, `crypto`'s `setEngine`, and the rest). In
+projects without lib.dom, Node's web globals (`Headers`, `Request`, `WebSocket`,
+...) are typed by `undici-types`, which has its own adapter. Where an
 adapter can't know a service's hosts, it uses bare `net`. PermLang runs itself
 with `"unmapped": "error"` and a team adapter for ts-morph (see
 [`permlang.config.json`](../permlang.config.json)).
@@ -600,15 +846,25 @@ Set `"strictness"` in `permlang.config.json`, or pass `--strictness`:
 
 ## The lock file and the permission diff
 
-`permlang lock` writes `permlang.lock.json`: what every function can reach, and what
-every workflow, Action, and `package.json` script grants. Commit it. From then on:
+`permlang lock` writes `permlang.lock.json`: what every function can reach, what
+every workflow, Action, and `package.json` script grants, and which files the check
+ran on and with which settings. Commit it. From then on:
 
-- **`permlang check` fails when the code reaches something the lock doesn't
-  record** (PERM005), at every strictness level, sketch included. New access
-  can't land without the lock changing, so it always shows up in review. The
-  error points at the line that reaches the new access, such as the new `fetch`
-  or the call into a helper that makes it. Access that was removed is a warning:
-  the lock is stale, but nothing new can happen.
+- **`permlang check` fails when the code and the lock differ in any way**
+  (PERM005), at every strictness level, sketch included:
+  - The code reaches something the lock doesn't record. New access can't land
+    without the lock changing, so it always shows up in review. The error points
+    at the line that reaches the new access, such as the new `fetch` or the call
+    into a helper that makes it.
+  - The lock records something the code doesn't reach. Otherwise a pull request
+    could approve access in advance by editing only the lock, for a later change
+    to use without showing up. The error points at the lock's own line.
+  - A `@perm-unsafe` override is new, gone, or has a different reason.
+  - The check ran on other files, or with other settings, than the lock records
+    (see below).
+
+  To approve any of these, run `permlang lock` and commit the change, so
+  reviewers see it.
 - **`permlang diff <base-ref> [paths...]` shows what changed since `base-ref`**, one row per
   new capability, with where it happens and which functions can now reach it:
 
@@ -617,26 +873,143 @@ every workflow, Action, and `package.json` script grants. Commit it. From then o
   | `+ net(api.data-broker.io)` | `scoreLead`<br>axios.post("https://api.data-broker.io/v2/enrich", ...) | `scoreLead`, `handleLead` |
 
   The diff compares `base-ref`'s lock with what the code reaches now, not only
-  with the lock file on disk. When the code reaches access the lock doesn't record
-  yet, the diff still lists it and adds a **Not approved yet** warning until
-  `permlang lock` is run and committed. With `--head <ref>`, it compares two
-  committed lock files.
+  with the lock file on disk. With `--head <ref>`, it compares two committed lock
+  files. Above the table, it says whatever makes it incomplete or the check fail:
+  - **Not approved yet**, when the code and the lock file don't match. Access the
+    lock records but the code doesn't reach is listed under its own heading.
+  - When the change deletes the lock file, or an older PermLang wrote it.
+  - When the code couldn't be analyzed (an invalid setting, say). The diff then
+    shows only what the lock files record, says so, and never says "No permission
+    changes".
+  - When the base commit has no lock file, so everything is listed as new.
+
+  Changes to what's checked, or how strictly, are listed under **Check settings
+  changed**, such as `unmapped: now trust, was warn`, or an `exclude` added to
+  tsconfig.json. New and changed `@perm-unsafe` reasons are listed with the old
+  reason.
 
   The diff also lists **new dependencies**: packages the change adds to
-  `./package.json`, in `dependencies` or `devDependencies`. For each one, it says
-  what PermLang sees (checked by an adapter, declared pure, detected directly, or
-  **not checked** because it has no adapter) and lists its `preinstall`,
-  `install`, and `postinstall` scripts when it's installed. It's there for review:
-  a new package doesn't fail the check, although calls into one with no adapter
-  get a `PERM006` warning.
+  `./package.json`, in `dependencies`, `devDependencies`, `optionalDependencies`,
+  or `peerDependencies`. For each one, it says what PermLang sees (checked by an
+  adapter, declared pure, detected directly, or **not checked** because it has no
+  adapter) and lists its `preinstall`, `install`, and `postinstall` scripts when
+  it's installed. It also lists a package already there that the change now
+  installs from somewhere other than the registry: an alias
+  (`"lodash": "npm:evil-lodash@1.0.0"`), a URL, git, or a local folder or tarball.
+  Its name, and so its adapter, stay the same while its code changes. These are
+  there for review: they don't fail the check, although calls into a package with
+  no adapter get a `PERM006` warning.
 
-`--format markdown` produces the pull-request comment; `--format json` is for
-tools, and includes `unrecorded` (the access the lock doesn't record yet, or
-`null`) and `dependencies`.
+`--format markdown` produces the pull-request comment. Text from the code is
+escaped so it can't change the comment: it can't break out of code formatting or
+a table, hide rows in an HTML comment, mention people (`@name`), or link issues,
+commits, URLs, or emoji (an invisible zero-width space breaks those). The
+comment stays under GitHub's length limit: a row names at most 20 functions,
+and when the comment would still be too long, it's cut short from the end, the
+new-access table first in line to stay, with a note saying how much is left out.
+If the diff can't be computed at all (the base commit can't be read, say),
+`--format markdown` still prints a comment that says so, and the command exits 2.
+
+`--format json` is for tools, and includes `unrecorded` (where the code and the
+lock file differ, or `null`), `unsafeChanged`, `analysisError` (or `null`),
+`lockDeleted`, `baseLockMissing`, and `dependencies` (each with its `section`, and
+`change`: `added` or `source`).
+
+The text output of `check`, `lock`, and `diff` escapes line breaks and control
+characters in anything from the code (`\n`, `\u001b`), so a string in the code
+can't print a line of its own, which GitHub Actions would obey as a workflow
+command, or drive the terminal.
 
 The check compares against `./permlang.lock.json` whenever it exists. When
 checking other files from the same folder (like the fixtures here), pass
 `--no-lock`.
+
+### What the lock records
+
+```json
+{
+  "permlang": 2,
+  "functions": {
+    ".github/workflows/ci.yml#<ci.yml>": ["ci.permission(contents: read)", "ci.trigger(pull_request)"],
+    "permlang.config.json#<permlang.config.json>": [
+      "permlang.files(src)",
+      "permlang.strictness(development)",
+      "permlang.tools(warn)",
+      "permlang.unmapped(warn)"
+    ],
+    "src/leads.ts#handleLead": ["db.write(lead)", "email.send"]
+  },
+  "unsafe": { "src/render.ts#compile": "template compiler; trusted input" }
+}
+```
+
+Keys are `<path>#<function>`, with the path relative to the lock file. Several
+functions of the same name in one file get `#2`, `#3`, in source order, and
+`@perm-unsafe` overrides are keyed the same way. A `#` or `%` in a file's name is
+written `%23` or `%25`, so the first `#` always ends the path. Functions that
+reach nothing are left out.
+
+The settings are an entry keyed by the config file (`permlang.config.json`, or
+the `--config` file), whether or not it exists:
+
+| Capability | What it records |
+| --- | --- |
+| `permlang.files(path)`, or `permlang.project(tsconfig.json)` | The files checked: the paths given (`src` when none are given and there's no `./tsconfig.json`), or the TypeScript project given with `--project` or found as `./tsconfig.json`. |
+| `permlang.strictness(level)`, `permlang.unmapped(policy)`, `permlang.tools(policy)` | The settings in effect: a command-line option (or the Action's `strictness` input), else `permlang.config.json`, else the default. |
+| `permlang.flow(from -> to)` | Each [flow rule](#data-flow-rules). |
+| `permlang.adapter(path sha256:...)` | Each adapter manifest, from the config file or `--adapter`, with the first 16 hex digits of the SHA-256 of its content. The content is hashed as parsed JSON, so line endings and formatting don't change it. |
+
+When the files come from a TypeScript project, its config is an entry too: its
+`include`, `exclude`, and `files` after following `extends` (TypeScript's
+defaults when they aren't set: everything included, the output folders
+excluded), and the compiler options that decide what imports and globals resolve
+to: `baseUrl`, `paths`, `rootDirs`, `typeRoots`, `types`, `lib`, `noLib`,
+`allowJs`, `moduleResolution`, `customConditions`, and `moduleSuffixes`.
+A tsconfig.json that can't be parsed, or that extends a file that isn't there, is
+an error (exit code 2).
+
+So narrowing `include`, lowering `strictness`, trusting packages with no adapter,
+adding an adapter that declares a package pure, dropping a flow rule, or checking
+other paths all fail the check until `permlang lock` records them, and show in
+the pull-request comment.
+
+**Check with the paths and options the lock was written with.** A check of
+other files fails with one error that says which files each was for:
+
+```
+permlang.config.json:1:1 error PERM005: This check ran on --project tsconfig.json, but permlang.lock.json was written for src.
+```
+
+A check with other settings fails with an error for each one:
+
+```
+permlang.config.json:1:1 error PERM005: The check runs with unmapped: trust (from --unmapped), but permlang.lock.json records unmapped: warn.
+```
+
+To change them, run `permlang lock` with the new paths and options, and commit
+the change. To try other settings without the lock, add `--no-lock`.
+
+**A missing lock file.** With `--require-lock`, a missing lock is an error
+(PERM005); the GitHub Action passes it when the pull request's base commit has
+the lock. A `--lock <file>` that doesn't exist is a usage error (exit code 2), so
+a mistyped path can't turn the comparison off. `--no-lock` with `--require-lock`
+is a usage error too. Without any of these, a check with no lock file checks
+only annotations.
+
+#### Upgrading from 0.3 or earlier
+
+Locks written before 0.4 are format 1, which recorded no settings. `permlang
+check` fails on one with a single error:
+
+```
+permlang.lock.json:1:1 error PERM005: permlang.lock.json was written by an older PermLang (lock format 1), which recorded less than this version checks.
+  -> run `permlang lock` once to update it, and commit the change.
+```
+
+Run `permlang lock` once, with the paths and options your check uses, and commit
+the result. Nothing in a pull request can make the check lenient instead: there's
+no grace period. `permlang lock` also replaces a lock it can't read at all (one
+with merge-conflict markers, say), with a warning to review all of it.
 
 ## GitHub Action
 
@@ -708,7 +1081,9 @@ scanning, where they appear in the repository's **Security** tab next to
 CodeQL's, and close on their own once fixed. The workflow needs
 `security-events: write` in its `permissions:`. The upload is best effort: on a
 pull request from a fork, whose token is read-only, it's skipped and the check
-still runs.
+still runs. Each `working-directory` uploads under its own category
+(`permlang`, or `permlang/<folder>`), so runs for several folders don't replace
+each other's alerts.
 
 ```yaml
 permissions:
@@ -731,6 +1106,43 @@ permissions:
 | `sarif` | `false` | Also upload the findings to code scanning. |
 | `github-token` | `github.token` | Token for the comment. |
 
+| Output | Meaning |
+| --- | --- |
+| `exit-code` | The exit code of `permlang check`: `0` no errors, `1` permission errors, `2` anything else (a usage or configuration error, a file that can't be read or written, or an internal error). |
+
+**The inputs and the lock file.** `args` and `strictness` change what's checked,
+so the lock file records them, as it does `permlang.config.json`: a pull request
+that changes them in its workflow fails the check until `permlang lock` is run
+with the same arguments and options, and committed. For a workflow with
+`args: src` and `strictness: sketch`, that's `npx permlang lock src --strictness sketch`.
+
+**A deleted lock file.** On pull requests and merge-queue entries, the Action
+fetches the base commit first. When the base has the lock file
+(`permlang.lock.json`, or the file `--lock` names in `args`), the check runs with
+`--require-lock`, so deleting the lock fails it, and the comment says the pull
+request deletes it. When the base commit can't be fetched, the lock is required
+anyway, with a warning. `--no-lock` in `args` then stops the check with a usage
+error.
+
+**The comment.** The Action updates its own comment on each push. It finds the
+comment by its first line, a marker that names the `working-directory` when it
+isn't the repository root (so runs for several folders each keep their own), and
+by the account of the token that posted it: `github-actions[bot]` for the default
+token, or a personal token's owner. It never edits a comment from another
+account. The comment's text goes to GitHub in a file, and stays under GitHub's
+length limit. If its comment can't be updated, the step fails, since the old
+comment would go on looking current. If the diff can't be computed, the comment
+says so instead. Other problems (fetching the base commit, posting a first
+comment without `pull-requests: write`) are warnings, and the diff is always in
+the job summary. A pull request from a fork gets the diff in the job summary
+only, since its token is read-only.
+
+**Node.** The Action runs PermLang on Node 22, from the runner's tool cache, by
+its full path, so the Node your later steps use doesn't change. On a runner
+without Node 22 in its tool cache (some self-hosted runners), it installs it
+with `actions/setup-node` (with its package-manager cache turned off), which
+does put it first on the PATH for later steps.
+
 ## Usage
 
 ```bash
@@ -742,13 +1154,20 @@ npm run permlang -- check src --json               # JSON report of declared vs.
 npm run permlang -- check src --github-annotations # also print GitHub Actions annotations (the Action does this)
 npm run permlang -- check src --sarif out.sarif    # also write the findings as SARIF, for code scanning
 npm run permlang -- lock src                       # write permlang.lock.json
+npm run permlang -- check src --require-lock       # also fail when permlang.lock.json is missing
 npm run permlang -- diff origin/main               # permission changes since main
 npm run permlang -- spec src --spec x.perm        # check a .perm spec against the code
 npm run permlang -- --version                      # the installed version
 npm run permlang -- check --help                   # usage (any command)
 ```
 
-Exit codes: `0` no errors, `1` permission errors, `2` usage or configuration error.
+Exit codes: `0` no errors; `1` permission errors, and nothing else; `2`
+anything else: a usage or configuration error, a file that can't be read or
+written, or an internal error. An internal error prints the error and where it
+happened, to [report](https://github.com/PermLang/PermLang/issues).
+
+With `--json`, `--github-annotations` prints the annotations on standard error,
+so standard output stays valid JSON. GitHub Actions reads both.
 
 ## Specs (phase 2 groundwork)
 
@@ -799,11 +1218,13 @@ other. Every fixture file must be a module (have an import or export).
 src/capability.ts   vocabulary, parsing, and coverage rules
 src/annotations.ts  reading @perm tags from JSDoc and @module comments
 src/adapters.ts     adapter manifests: loading, validation, matching
-src/detect/         direct uses: fetch, fs, env, Prisma, Drizzle, SQL, adapter-mapped calls, values, unverifiable code
-src/dispatch.ts     implementations reachable through interfaces and base classes
+src/detect/         direct uses: fetch, fs, env, browser and Node globals, Prisma, Drizzle, SQL, adapter-mapped calls, values, module loads, unverifiable code
+src/dispatch.ts     implementations reachable through interfaces, type aliases, and base classes
 src/units.ts        functions, methods, and files that permissions attach to
 src/graph.ts        the call graph and propagation along it
-src/unmapped.ts     packages with no adapter, and imports with no types
+src/walk.ts         walking syntax trees without recursion, and finding positions in them
+src/load.ts         building the ts-morph project, setting aside files that can't be parsed
+src/unmapped.ts     packages with no adapter, and imports (and `process`) with no types
 src/unseen.ts       code a function reaches that has no types, for checking specs
 src/project-files.ts workflows, Actions, and package.json scripts, as lock entries
 src/workflow-files.ts what a workflow or Action grants, read where GitHub reads it
@@ -815,6 +1236,7 @@ src/flows.ts        data-flow rules: parsing, and finding functions that break t
 src/deps.ts         new dependencies in a change
 src/check.ts        comparing declared vs. actual per unit
 src/lock.ts         permlang.lock.json: build, read, compare
+src/settings.ts     what the check runs with (config, options, files), as lock entries
 src/diff.ts         the permission diff, as text or a pull-request comment
 src/report.ts       text, JSON, GitHub annotation, and SARIF output
 src/main.ts         the permlang command: its subcommands and options

@@ -29,7 +29,9 @@ describe("permlang init", () => {
     const { code, out } = permlang("init", "src");
     expect(code).toBe(0);
     expect(JSON.parse(readFileSync(path.join(dir, "permlang.config.json"), "utf8"))).toEqual({ strictness: "sketch" });
+    // The lock also records what was checked, and with which settings.
     expect(JSON.parse(readFileSync(path.join(dir, "permlang.lock.json"), "utf8")).functions).toEqual({
+      "permlang.config.json#<permlang.config.json>": ["permlang.files(src)", "permlang.strictness(sketch)", "permlang.tools(warn)", "permlang.unmapped(warn)"],
       "src/app.ts#ping": ["net(api.example.com)"],
     });
     expect(out).toMatch(/Next steps/);

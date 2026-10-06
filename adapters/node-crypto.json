@@ -1,0 +1,7 @@
+{
+  "permlang": 1,
+  "package": "crypto",
+  "functions": {
+    "setEngine": ["unverifiable"]
+  }
+}

@@ -6,7 +6,15 @@ import { format } from "node:util";
 import { vi } from "vitest";
 import { main } from "../src/main.js";
 
-export function runCli(args: string[], options: { cwd: string; env?: Record<string, string | undefined> }): { code: number; out: string } {
+type Options = { cwd: string; env?: Record<string, string | undefined> };
+
+export function runCli(args: string[], options: Options): { code: number; out: string } {
+  const { code, stdout, stderr } = runCliStreams(args, options);
+  return { code, out: code === 0 ? stdout : stdout + stderr };
+}
+
+/** The same, with standard output and standard error apart. */
+export function runCliStreams(args: string[], options: Options): { code: number; stdout: string; stderr: string } {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const log = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => void stdout.push(`${format(...a)}\n`));
@@ -19,7 +27,7 @@ export function runCli(args: string[], options: { cwd: string; env?: Record<stri
   try {
     code = main(args);
   } catch (e) {
-    // Uncaught, it would end the process with the error and exit code 1.
+    // main() catches everything, so this is a bug in it: reported as the crash it would be.
     stderr.push(`${(e as Error).stack ?? String(e)}\n`);
     code = 1;
   } finally {
@@ -28,7 +36,7 @@ export function runCli(args: string[], options: { cwd: string; env?: Record<stri
     log.mockRestore();
     error.mockRestore();
   }
-  return { code, out: code === 0 ? stdout.join("") : stdout.join("") + stderr.join("") };
+  return { code, stdout: stdout.join(""), stderr: stderr.join("") };
 }
 
 function setEnv(values: Record<string, string | undefined>) {

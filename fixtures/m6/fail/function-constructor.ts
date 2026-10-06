@@ -14,10 +14,13 @@ export function viaReflect() {
   return Reflect.construct(Function, ["return 1"]); // expect: error PERM004 unverifiable
 }
 
-// Found while fixing the above: `.call`/`.apply`/`.bind` on a capability function.
+// Found while fixing the above: `.call`/`.apply`/`.bind` on a capability function. `.call` and
+// `.apply` with a literal list are checked with their arguments.
 /** @perm env(MODE) */
-export function viaCall() {
-  return fetch.call(globalThis, "https://call.example/"); // expect: error PERM001 net
+export function viaCall(u: string) {
+  fetch.call(globalThis, "https://call.example/"); // expect: error PERM001 net(call.example)
+  fetch.apply(globalThis, ["https://apply.example/"]); // expect: error PERM001 net(apply.example)
+  return fetch.apply(globalThis, [u] as [string]); // expect: error PERM001 net
 }
 
 // A value typed `Function` could be anything, including the constructor.

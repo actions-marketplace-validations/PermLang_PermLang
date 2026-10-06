@@ -124,6 +124,7 @@ describe("diagnostic content", () => {
       "unsafe-still-propagates.ts legacy: wraps a legacy client",
       "unsafe.ts legacySync: legacy SDK builds URLs at runtime; tracked in PERM-12",
       "unsafe-stops-unverifiable.ts compile: template compiler; input is trusted build-time templates",
+      "unsafe-unannotated-caller.ts compile: template compiler; input is trusted build-time templates",
     ]);
   });
 

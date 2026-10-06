@@ -1,23 +1,31 @@
-// permlang.lock.json records what every function can reach. It is committed, so
-// new access shows up as a change to the lock in the pull request's own diff,
-// and `permlang check` fails when code and lock disagree (the approach capcheck
-// uses for Go). `permlang lock` rewrites it.
+// permlang.lock.json records what every function can reach, what the project's configuration
+// grants, and the settings the check runs with. It is committed, so new access shows up as a
+// change to the lock in the pull request's own diff, and `permlang check` fails when the code and
+// the lock differ in any way (the approach capcheck uses for Go). `permlang lock` rewrites it.
 //
 //   {
-//     "permlang": 1,
-//     "functions": { "src/leads.ts#handleLead": ["db.write(lead)", "email.send"] },
+//     "permlang": 2,
+//     "functions": {
+//       "permlang.config.json#<permlang.config.json>": ["permlang.files(src)", "permlang.strictness(development)", ...],
+//       "src/leads.ts#handleLead": ["db.write(lead)", "email.send"]
+//     },
 //     "unsafe": { "src/render.ts#compile": "template compiler; trusted input" }
 //   }
 //
-// Keys are `<path relative to the lock file>#<function name>`, with `#2`, `#3`
-// appended when a file has several functions of the same name. Line numbers are
-// left out so that moving code doesn't change the lock.
+// Keys are `<path relative to the lock file>#<function name>`, with `#2`, `#3` appended when a
+// file has several functions of the same name. A `#` or `%` in the path is percent-encoded, so
+// the first `#` always ends it. Line numbers are left out so that moving code doesn't change the
+// lock. Version 1 (PermLang 0.1 to 0.3) recorded no settings; it's read only so that
+// `permlang lock` can replace it.
 
 import path from "node:path";
 import type { Diagnostic, Report } from "./check.js";
+import { describeScope, isSetting, isSingleValued, scopeOf, settingKind, settingPhrase } from "./settings.js";
+
+export const LOCK_VERSION = 2;
 
 export interface LockFile {
-  permlang: 1;
+  permlang: 1 | 2;
   /** Each function's actual permissions, sorted. Functions that reach nothing are left out. */
   functions: Record<string, string[]>;
   /** Functions with @perm-unsafe, and the reason given. */
@@ -32,13 +40,8 @@ export function buildLock(report: Report, root: string): LockFile {
     if (fn.actual.length > 0) functions[key] = [...fn.actual].sort();
   }
   const unsafe: Record<string, string> = {};
-  const keys = new Map(keyed(report, root).map(({ key, fn }) => [`${fn.file}\0${fn.line}\0${fn.name}`, key]));
-  for (const u of report.unsafe) {
-    const fn = report.functions.find((f) => f.file === u.file && f.name === u.function);
-    const key = fn ? keys.get(`${fn.file}\0${fn.line}\0${fn.name}`) : undefined;
-    unsafe[key ?? `${relative(root, u.file)}#${u.function}`] = u.reason;
-  }
-  return { permlang: 1, functions: sortKeys(functions), unsafe: sortKeys(unsafe) };
+  for (const { key, u } of keyedUnsafe(report, root)) unsafe[key] = u.reason;
+  return { permlang: LOCK_VERSION, functions: sortKeys(functions), unsafe: sortKeys(unsafe) };
 }
 
 /** Each reported function with its lock key; same-named functions in a file are numbered in source order. */
@@ -47,101 +50,214 @@ export function keyed(report: Report, root: string): { key: string; fn: Report["
   return [...report.functions]
     .sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line)
     .map((fn) => {
-      const base = `${relative(root, fn.file)}#${fn.name}`;
+      const base = `${keyPath(root, fn.file)}#${fn.name}`;
       const n = (seen.get(base) ?? 0) + 1;
       seen.set(base, n);
       return { key: n === 1 ? base : `${base}#${n}`, fn };
     });
 }
 
-export function serializeLock(lock: LockFile): string {
-  return `${JSON.stringify({ permlang: 1, functions: sortKeys(lock.functions), unsafe: sortKeys(lock.unsafe) }, null, 2)}\n`;
+/**
+ * Each @perm-unsafe override with the key of the function it's on, so that two functions of the
+ * same name get their own entries (`#2`), as they do in "functions". The tag is in the comment
+ * just above its function: the first function of that name at or after the tag's line.
+ */
+function keyedUnsafe(report: Report, root: string): { key: string; u: Report["unsafe"][number] }[] {
+  const functions = keyed(report, root).filter(({ fn }) => fn.kind !== "config");
+  return report.unsafe.map((u) => {
+    const match = functions.filter(({ fn }) => fn.file === u.file && fn.name === u.function && fn.line >= u.line).sort((a, b) => a.fn.line - b.fn.line)[0];
+    return { key: match?.key ?? `${keyPath(root, u.file)}#${u.function}`, u };
+  });
 }
 
-/** @throws LockError when the file isn't a valid lock. */
-export function parseLock(text: string, source: string): LockFile {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch (e) {
-    throw new LockError(`${source}: not valid JSON (${(e as Error).message}). Run \`permlang lock\` to regenerate it.`);
-  }
-  const m = raw as { permlang?: unknown; functions?: unknown; unsafe?: unknown };
-  if (typeof raw !== "object" || raw === null) throw new LockError(`${source}: a lock file must be a JSON object.`);
-  if (m.permlang !== 1) throw new LockError(`${source}: unsupported lock file version ${JSON.stringify(m.permlang)}; expected 1.`);
-
-  const functions: Record<string, string[]> = {};
-  for (const [key, caps] of Object.entries((m.functions ?? {}) as Record<string, unknown>)) {
-    if (!Array.isArray(caps) || !caps.every((c) => typeof c === "string")) {
-      throw new LockError(`${source}: "${key}" must list capabilities as an array of strings.`);
-    }
-    functions[key] = [...caps].sort();
-  }
-  const unsafe: Record<string, string> = {};
-  for (const [key, reason] of Object.entries((m.unsafe ?? {}) as Record<string, unknown>)) {
-    if (typeof reason !== "string") throw new LockError(`${source}: unsafe entry "${key}" must be a reason string.`);
-    unsafe[key] = reason;
-  }
-  return { permlang: 1, functions: sortKeys(functions), unsafe: sortKeys(unsafe) };
+export function serializeLock(lock: LockFile): string {
+  return `${JSON.stringify({ permlang: LOCK_VERSION, functions: sortKeys(lock.functions), unsafe: sortKeys(lock.unsafe) }, null, 2)}\n`;
 }
 
 /**
- * Where the code and the committed lock disagree. New access is an error: it
- * hasn't been reviewed. Access the lock records but the code no longer has is a
- * warning: the lock is stale, but nothing new can happen.
+ * Reads a lock file, version 1 or 2. Look its records up with own(): a key can be named
+ * `toString` or `__proto__`, which a plain lookup would find on every object.
+ * @throws LockError when the file isn't a valid lock.
  */
-export function lockDrift(committed: LockFile, current: LockFile, report: Report, lockFile: string): Diagnostic[] {
+export function parseLock(text: string, source: string): LockFile {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text.replace(/^\u{FEFF}/u, ""));
+  } catch (e) {
+    throw new LockError(`${source}: not valid JSON (${oneLine((e as Error).message)}). Run \`permlang lock\` to regenerate it.`);
+  }
+  if (!isRecord(raw)) throw new LockError(`${source}: a lock file must be a JSON object.`);
+  const version = own(raw, "permlang");
+  if (version !== 1 && version !== 2) {
+    const shown = version === undefined ? "missing" : oneLine(JSON.stringify(version));
+    throw new LockError(`${source}: lock file version ${shown} isn't one this PermLang reads (1 or 2). Run \`permlang lock\` to regenerate it.`);
+  }
+  const functions: Record<string, string[]> = Object.create(null);
+  for (const [key, caps] of Object.entries(record(own(raw, "functions"), `${source}: "functions"`))) {
+    if (!Array.isArray(caps) || !caps.every((c) => typeof c === "string")) {
+      throw new LockError(`${source}: "${oneLine(key)}" must list capabilities as an array of strings.`);
+    }
+    functions[key] = [...caps].sort();
+  }
+  const unsafe: Record<string, string> = Object.create(null);
+  for (const [key, reason] of Object.entries(record(own(raw, "unsafe"), `${source}: "unsafe"`))) {
+    if (typeof reason !== "string") throw new LockError(`${source}: unsafe entry "${oneLine(key)}" must be a reason string.`);
+    unsafe[key] = reason;
+  }
+  return { permlang: version, functions: sortKeys(functions), unsafe: sortKeys(unsafe) };
+}
+
+/**
+ * Where the code and the committed lock differ. Every difference is an error, because the lock is
+ * what reviewers approve: new access hasn't been reviewed, and access the lock records but the
+ * code doesn't reach would approve it in advance, for a later change to use unseen. The same goes
+ * for @perm-unsafe overrides and their reasons, and for the settings the check runs with.
+ *
+ * @param current buildLock(report): what the code reaches now.
+ * @param lockText the lock file's text, to point at the line of an entry only the lock has.
+ */
+export function lockDrift(committed: LockFile, current: LockFile, report: Report, lockFile: string, lockText = ""): Diagnostic[] {
   const root = path.dirname(lockFile);
   const lockName = path.basename(lockFile);
-  const locations = new Map(keyed(report, root).map(({ key, fn }) => [key, fn]));
-  const out: Diagnostic[] = [];
   const fix = "run `permlang lock` and commit the change so reviewers see it.";
-  // Locks written before PermLang recorded configuration (0.3) have none of it. Its first
-  // appearance is reported, but doesn't fail the build: nothing in it is new.
-  const configRecorded = Object.keys(committed.functions).some(isConfigKey);
+  const settingsFix =
+    "to make these the settings, run `permlang lock` with the same options and commit the change so reviewers see it. To try other settings without the lock, add --no-lock.";
+  const inLock = (key: string, capability?: string, from = 0) => ({ file: lockFile, line: lineInLock(lockText, key, capability, from) ?? 1, column: 1 });
+  const drift = (d: Omit<Diagnostic, "severity" | "code" | "call">): Diagnostic => ({ severity: "error", code: "PERM005", call: "", ...d });
 
-  for (const change of diffLocks(committed, current).functions) {
+  // A lock from before settings were recorded can't be compared: one error says what to do.
+  if (committed.permlang !== LOCK_VERSION) {
+    return [
+      drift({
+        ...inLock(""),
+        function: "<lock>",
+        capability: "",
+        message: `${lockName} was written by an older PermLang (lock format ${committed.permlang}), which recorded less than this version checks.`,
+        fix: "run `permlang lock` once to update it, and commit the change.",
+      }),
+    ];
+  }
+
+  // Checking other files than the lock was written for: comparing function by function would
+  // only list everything that's in one set and not the other.
+  const was = scopeOf(committed);
+  const now = scopeOf(current);
+  if (was.join("\0") !== now.join("\0")) {
+    const settings = keyed(report, root).find(({ fn }) => fn.kind === "config" && fn.actual.some((c) => now.includes(c)));
+    return [
+      drift({
+        ...(settings ? { file: settings.fn.file, line: 1, column: 1 } : inLock("")),
+        function: settings?.fn.name ?? "<lock>",
+        capability: now.join(", "),
+        message: `This check ran on ${describeScope(now)}, but ${lockName} was written for ${describeScope(was)}.`,
+        fix: "run the check on the same files, or run `permlang lock` on these and commit the change so reviewers see it.",
+      }),
+    ];
+  }
+
+  const locations = new Map(keyed(report, root).map(({ key, fn }) => [key, fn]));
+  const changes = diffLocks(committed, current);
+  const out: Diagnostic[] = [];
+  for (const change of changes.functions) {
     const fn = locations.get(change.key);
-    const at = fn ? { file: fn.file, line: fn.line } : { file: lockFile, line: 1 };
     const config = isConfigKey(change.key);
+    const settings = config ? change.added.filter(isSetting) : [];
+    const oldSettings = config ? change.removed.filter(isSetting) : [];
+    // A setting with one value that changed: one error that gives both values.
+    const paired = new Map<string, string>();
+    for (const c of settings.filter(isSingleValued)) {
+      const old = oldSettings.find((o) => settingKind(o) === settingKind(c));
+      if (old) paired.set(c, old);
+    }
     for (const capability of change.added) {
-      // At the line that reaches it, so the error (and its pull-request annotation) lands on the change.
-      const site = fn?.sites[capability];
-      const unrecorded = config && !configRecorded;
-      out.push({
-        severity: unrecorded ? "warning" : "error",
-        code: "PERM005",
-        ...at,
-        ...(site ? { line: site.line } : {}),
-        column: site?.column ?? 1,
-        function: change.name,
-        capability,
-        call: "",
-        message: unrecorded
-          ? `${lockName} doesn't record project configuration yet (PermLang 0.3 adds it): ${change.file} grants ${capability}.`
-          : config
-            ? `${change.file} now grants ${capability}, which ${lockName} doesn't record.`
-            : `${change.name} can now reach ${capability}, which ${lockName} doesn't record.`,
-        fix,
-      });
+      // Added access is in `current`, so the report has it, and where it's reached: the error (and
+      // its pull-request annotation) lands on the change.
+      const { file, sites, via } = fn!;
+      const site = sites[capability]!;
+      const setting = settings.includes(capability);
+      const old = paired.get(capability);
+      const subject = `${settingSubject(change.file, capability)} ${settingPhrase(capability)}${setting ? origin(via[capability]![0]) : ""}`;
+      out.push(
+        drift({
+          file,
+          line: site.line,
+          column: site.column,
+          function: change.name,
+          capability,
+          message: old
+            ? `${subject}, but ${lockName} records ${settingPhrase(old)}.`
+            : setting
+              ? `${subject}, which ${lockName} doesn't record.`
+              : config
+                ? `${change.file} now grants ${capability}, which ${lockName} doesn't record.`
+                : `${change.name} can now reach ${capability}, which ${lockName} doesn't record.`,
+          fix: setting ? settingsFix : fix,
+        }),
+      );
     }
     for (const capability of change.removed) {
-      out.push({
-        severity: "warning",
-        code: "PERM005",
-        ...at,
-        column: 1,
-        function: change.name,
-        capability,
-        call: "",
-        message: config
-          ? `${change.file} ${change.status === "removed" ? "no longer exists or" : "no longer"} grants ${capability}, but ${lockName} still records it.`
-          : `${change.name} ${change.status === "removed" ? "no longer exists or" : "no longer"} reaches ${capability}, but ${lockName} still records it.`,
-        fix,
-      });
+      if ([...paired.values()].includes(capability)) continue;
+      const setting = oldSettings.includes(capability);
+      const gone = change.status === "removed" ? "no longer exists or" : "no longer";
+      out.push(
+        drift({
+          // On the lock's own line: a pull request that adds it there shows it there.
+          ...inLock(change.key, capability),
+          function: change.name,
+          capability,
+          message: setting
+            ? `${lockName} records ${settingPhrase(capability)}, which ${capability.startsWith("tsconfig.") ? `${change.file} no longer has` : "the check no longer runs with"}.`
+            : config
+              ? `${change.file} ${gone} grants ${capability}, but ${lockName} still records it.`
+              : `${change.name} ${gone} reaches ${capability}, but ${lockName} still records it.`,
+          fix: setting ? settingsFix : fix,
+        }),
+      );
     }
   }
+
+  // @perm-unsafe overrides suppress checks, so each one is reviewed like new access.
+  const overrides = new Map(keyedUnsafe(report, root).map(({ key, u }) => [key, u]));
+  // At the tag in the code, or for one only the lock has, at its line in the lock.
+  const atOverride = (key: string) => {
+    const u = overrides.get(key);
+    return u ? { file: u.file, line: u.line, column: 1 } : inLock(key, undefined, lockText.indexOf('"unsafe":'));
+  };
+  const override = (key: string, message: string) => drift({ ...atOverride(key), function: splitKey(key)[1], capability: "@perm-unsafe", message, fix });
+  for (const { key, reason } of changes.unsafeAdded) {
+    out.push(override(key, `${splitKey(key)[1]} has a new @perm-unsafe override (${JSON.stringify(reason)}), which ${lockName} doesn't record.`));
+  }
+  for (const { key, reason } of changes.unsafeRemoved) {
+    out.push(override(key, `${lockName} records a @perm-unsafe override on ${splitKey(key)[1]} (${JSON.stringify(reason)}), which the code no longer has.`));
+  }
+  for (const { key, before, after } of changes.unsafeChanged) {
+    out.push(override(key, `${splitKey(key)[1]}'s @perm-unsafe reason is now ${JSON.stringify(after)}, but ${lockName} records ${JSON.stringify(before)}.`));
+  }
   return out;
+}
+
+/** "The check runs with" for PermLang's own settings; "tsconfig.json now has" for the project's. */
+function settingSubject(file: string, capability: string): string {
+  return capability.startsWith("tsconfig.") ? `${file} now has` : "The check runs with";
+}
+
+/** Where a setting came from, when it isn't the config file: a command-line option, or the default. */
+function origin(from: string | undefined): string {
+  if (from?.startsWith("--")) return ` (from ${from})`;
+  if (from === "default") return " (the default)";
+  return "";
+}
+
+/**
+ * The line of an entry in the lock file's text, if it's there: of the capability, when it's in the
+ * entry's list (which serializeLock ends on a line of its own), else of the key.
+ */
+function lineInLock(text: string, key: string, capability: string | undefined, from: number): number | undefined {
+  const at = text.indexOf(`${JSON.stringify(key)}:`, from);
+  if (at === -1) return undefined;
+  const within = capability === undefined ? -1 : text.indexOf(JSON.stringify(capability), at);
+  const pos = within !== -1 && within < text.indexOf("\n    ]", at) ? within : at;
+  return text.slice(0, pos).split("\n").length;
 }
 
 // --- diff --------------------------------------------------------------------
@@ -155,15 +271,20 @@ export interface FunctionChange {
   removed: string[];
 }
 
-/** A configuration file's entry (`.github/workflows/ci.yml#<ci.yml>`), not a function's. */
+/**
+ * A configuration file's entry (`.github/workflows/ci.yml#<ci.yml>`, `permlang.config.json#<permlang.config.json>`),
+ * not a function's. File names can be in any case (`CI.YML`), and JSON5 or JSONC.
+ */
 export function isConfigKey(key: string): boolean {
-  return /#<[^<>#]+\.(?:ya?ml|json)>$/.test(key);
+  return /#<[^<>]+\.(?:ya?ml|json[5c]?)>$/i.test(key);
 }
 
 export interface LockDiff {
   functions: FunctionChange[];
   unsafeAdded: { key: string; reason: string }[];
   unsafeRemoved: { key: string; reason: string }[];
+  /** Overrides whose reason changed. */
+  unsafeChanged: { key: string; before: string; after: string }[];
 }
 
 /** What changed between two locks. A missing base means everything in head is new. */
@@ -172,31 +293,60 @@ export function diffLocks(base: LockFile | undefined, head: LockFile): LockDiff 
   const after = head.functions;
   const functions: FunctionChange[] = [];
   for (const key of [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()) {
-    const was = new Set(before[key] ?? []);
-    const now = new Set(after[key] ?? []);
+    const was = new Set(own(before, key) ?? []);
+    const now = new Set(own(after, key) ?? []);
     const added = [...now].filter((c) => !was.has(c)).sort();
     const removed = [...was].filter((c) => !now.has(c)).sort();
     if (added.length === 0 && removed.length === 0) continue;
-    const status = !(key in before) ? "added" : !(key in after) ? "removed" : "changed";
+    const status = !Object.hasOwn(before, key) ? "added" : !Object.hasOwn(after, key) ? "removed" : "changed";
     const [file, name] = splitKey(key);
     functions.push({ key, file, name, status, added, removed });
   }
   const beforeUnsafe = base?.unsafe ?? {};
+  const afterUnsafe = head.unsafe;
+  const entries = (r: Record<string, string>) => Object.entries(r).map(([key, reason]) => ({ key, reason }));
   return {
     functions,
-    unsafeAdded: Object.entries(head.unsafe).filter(([k]) => !(k in beforeUnsafe)).map(([key, reason]) => ({ key, reason })),
-    unsafeRemoved: Object.entries(beforeUnsafe).filter(([k]) => !(k in head.unsafe)).map(([key, reason]) => ({ key, reason })),
+    unsafeAdded: entries(afterUnsafe).filter(({ key }) => !Object.hasOwn(beforeUnsafe, key)),
+    unsafeRemoved: entries(beforeUnsafe).filter(({ key }) => !Object.hasOwn(afterUnsafe, key)),
+    unsafeChanged: entries(afterUnsafe).flatMap(({ key, reason }) => {
+      const old = own(beforeUnsafe, key);
+      return old !== undefined && old !== reason ? [{ key, before: old, after: reason }] : [];
+    }),
   };
 }
 
-/** "src/a.ts#Class.method#2" → ["src/a.ts", "Class.method"]. */
+/** "src/a.ts#Class.method#2" → ["src/a.ts", "Class.method"]; "a%23b.ts#f" → ["a#b.ts", "f"]. */
 export function splitKey(key: string): [string, string] {
   const i = key.indexOf("#");
-  return [key.slice(0, i), key.slice(i + 1).replace(/#\d+$/, "")];
+  if (i === -1) return [key, key];
+  const file = key.slice(0, i).replace(/%23|%25/gi, (e) => (e === "%23" ? "#" : "%"));
+  return [file, key.slice(i + 1).replace(/#\d+$/, "")];
 }
 
-function relative(root: string, file: string): string {
-  return path.relative(root, file).replaceAll("\\", "/");
+/** A record's own property, never one every object inherits, such as `toString`. */
+export function own<T>(record: Record<string, T>, key: string): T | undefined {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+/** A file's path in a lock key: relative to the lock, with `/`, and `%` and `#` percent-encoded. */
+function keyPath(root: string, file: string): string {
+  return path.relative(root, file).replaceAll("\\", "/").replaceAll("%", "%25").replaceAll("#", "%23");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function record(value: unknown, what: string): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (!isRecord(value)) throw new LockError(`${what} must be an object.`);
+  return value;
+}
+
+/** Text from the lock (an error message from JSON.parse can quote it), on one line. */
+function oneLine(text: string): string {
+  return text.replace(/[\x00-\x1f\x7f-\x9f\u{2028}\u{2029}]/gu, " ");
 }
 
 function sortKeys<T>(record: Record<string, T>): Record<string, T> {

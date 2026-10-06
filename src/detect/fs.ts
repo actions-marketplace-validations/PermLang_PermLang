@@ -1,17 +1,47 @@
 // Node's fs and fs/promises, classified into reads and writes with literal paths.
 // This stays custom code rather than an adapter manifest: open() depends on its
-// flags, and copies read one path and write another.
+// flags, readFile() on its `flag` option, and copies read one path and write another.
 
-import { Node } from "ts-morph";
+import { Node, type Type } from "ts-morph";
 import type { Capability } from "../capability.js";
-import { literalString } from "./shared.js";
+import { literalString, propertyValue } from "./shared.js";
 
 const FS_MODULES = new Set(["fs", "node:fs", "fs/promises", "node:fs/promises"]);
 
+// Classes whose constructors open a file: what each is classified as. ReadStream and
+// WriteStream declare no constructor of their own, so they're matched by the class.
+const STREAM_CLASSES = new Map<string | undefined, string>([["ReadStream", "createReadStream"], ["WriteStream", "createWriteStream"], ["Utf8Stream", "Utf8Stream"]]);
+
 /** The fs function a declaration is, or undefined. */
 export function fsFunctionName(declaration: Node): string | undefined {
+  if (Node.isClassDeclaration(declaration) || Node.isConstructorDeclaration(declaration)) {
+    const owner = Node.isClassDeclaration(declaration) ? declaration : declaration.getParent();
+    return Node.isClassDeclaration(owner) && isInFsModule(owner) ? STREAM_CLASSES.get(owner.getName()) : undefined;
+  }
+  if (Node.isMethodSignature(declaration)) return fileHandleMethod(declaration);
   if (!Node.isFunctionDeclaration(declaration) && !Node.isVariableDeclaration(declaration)) return undefined;
-  return isInFsModule(declaration) ? declaration.getName() : undefined;
+  if (!isInFsModule(declaration)) return undefined;
+  // `realpathSync.native()` and `readFile.__promisify__()` are declared in a namespace named after the function.
+  const namespace = declaration.getParent()?.getParent();
+  if (Node.isModuleDeclaration(namespace) && !Node.isStringLiteral(namespace.getNameNode())) return namespace.getName();
+  return declaration.getName();
+}
+
+/**
+ * The fs class an instance type is (`new fs.WriteStream(path)`), or extends when `direct` is
+ * false, as fsFunctionName names it.
+ */
+export function fsStreamClass(type: Type, direct = true): { name: string; direct: boolean } | undefined {
+  for (const declaration of type.getSymbol()?.getDeclarations() ?? []) {
+    const name = fsFunctionName(declaration);
+    if (name !== undefined) return { name, direct };
+  }
+  // Class hierarchies can't be circular, so this ends.
+  for (const base of type.getBaseTypes()) {
+    const found = fsStreamClass(base, false);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 /**
@@ -27,15 +57,30 @@ function isInFsModule(declaration: Node): boolean {
   return false;
 }
 
-// Operations on an open descriptor add no access; it was granted at open().
+// FileHandle methods that change a file's metadata, which works whatever it was opened for.
+const FILE_HANDLE_METADATA = new Map([["chmod", "fchmod"], ["chown", "fchown"], ["utimes", "futimes"]]);
+
+function fileHandleMethod(declaration: Node & { getName(): string }): string | undefined {
+  const owner = declaration.getParent();
+  if (!Node.isInterfaceDeclaration(owner) || owner.getName() !== "FileHandle") return undefined;
+  const inFs = owner.getAncestors().some((a) => Node.isModuleDeclaration(a) && FS_MODULES.has(a.getName().replace(/^["']|["']$/g, "")));
+  return inFs ? FILE_HANDLE_METADATA.get(declaration.getName()) : undefined;
+}
+
+// Operations on an open descriptor add no access; it was granted at open(). Writing to one opened
+// only for reading fails.
 const FD_ONLY = new Set([
-  "close", "fsync", "fdatasync", "fstat", "read", "readv", "write", "writev",
-  "ftruncate", "fchmod", "fchown", "futimes",
+  "close", "fsync", "fdatasync", "fstat", "read", "readv", "write", "writev", "ftruncate",
 ]);
+// Changing a file's mode, owner, or times through a descriptor works however it was opened, so
+// it writes the file, whose path isn't known here.
+const FD_METADATA = new Set(["fchmod", "fchown", "futimes"]);
 const READS = new Set([
-  "readFile", "readdir", "stat", "lstat", "statfs", "exists", "access", "createReadStream",
+  "readdir", "stat", "lstat", "statfs", "exists", "access",
   "watch", "watchFile", "unwatchFile", "realpath", "readlink", "opendir", "glob", "openAsBlob",
 ]);
+// Reads, unless an options argument's `flag` (readFile) or `flags` (createReadStream) opens the file for writing.
+const FLAGGED_READS = new Set(["readFile", "createReadStream"]);
 // Source is read, destination is written.
 const COPIES = new Set(["copyFile", "cp"]);
 // Every path argument is written.
@@ -52,7 +97,11 @@ export function fsCapabilities(fn: string, args: readonly Node[]): Capability[] 
   const write = (i: number) => scoped("fs.write", i);
 
   if (FD_ONLY.has(base)) return [];
+  if (FD_METADATA.has(base)) return [{ name: "fs.write", dynamic: true }];
   if (READS.has(base)) return [read(0)];
+  // Used as a value, it could be called with any flags.
+  if (FLAGGED_READS.has(base)) return flagCapabilities(args.length === 0 ? undefined : optionFlags(args[1]), read(0), write(0));
+  if (base === "Utf8Stream") return utf8StreamCapabilities(args[0]);
   if (COPIES.has(base)) return [read(0), write(1)];
   if (TWO_PATH_WRITES.has(base)) return [write(0), write(1)];
   if (base === "open") return openCapabilities(args, read(0), write(0));
@@ -65,11 +114,46 @@ function openCapabilities(args: readonly Node[], read: Capability, write: Capabi
   // Used as a value, open() could be called with any flags.
   if (args.length === 0) return [read, write];
   const flags = args[1];
-  if (!flags) return [read];
-  const f = literalString(flags);
-  if (f === undefined) return [read, write];
+  return flagCapabilities(flags ? literalString(flags) : "r", read, write);
+}
+
+/** What opening a file with `flags` allows; undefined flags could be anything. */
+function flagCapabilities(flags: string | undefined, read: Capability, write: Capability): Capability[] {
+  if (flags === undefined) return [read, write];
   const caps: Capability[] = [];
-  if (f.includes("r") || f.includes("+")) caps.push(read);
-  if (/[wax+]/.test(f)) caps.push(write);
+  if (flags.includes("r") || flags.includes("+")) caps.push(read);
+  if (/[wax+]/.test(flags)) caps.push(write);
   return caps.length > 0 ? caps : [read, write];
+}
+
+/**
+ * The flags an options argument opens a file with: readFile's `flag`, createReadStream's `flags`.
+ * "r" when it can't set any (an encoding string, or a type without them); undefined when they
+ * can't be known.
+ */
+function optionFlags(options: Node | undefined): string | undefined {
+  if (!options) return "r";
+  if (Node.isObjectLiteralExpression(options)) {
+    for (const name of ["flag", "flags"]) {
+      const value = propertyValue(options, name);
+      if (value === "unknown") return undefined;
+      if (value !== "absent") return literalString(value);
+    }
+    return "r";
+  }
+  const type = options.getType();
+  if (type.isAny() || type.isUnknown()) return undefined;
+  const mayHaveFlags = (t: Type) => t.getProperty("flag") !== undefined || t.getProperty("flags") !== undefined || t.getStringIndexType() !== undefined;
+  return (type.isUnion() ? type.getUnionTypes() : [type]).some(mayHaveFlags) ? undefined : "r";
+}
+
+/** `new fs.Utf8Stream({ dest })` writes `dest`; with only an `fd` (such as stdout), it writes to what's already open. */
+function utf8StreamCapabilities(options: Node | undefined): Capability[] {
+  if (options && Node.isObjectLiteralExpression(options)) {
+    const dest = propertyValue(options, "dest");
+    if (dest === "absent" && propertyValue(options, "fd") !== "absent") return [];
+    const path = dest === "absent" || dest === "unknown" ? undefined : literalString(dest);
+    if (path !== undefined) return [{ name: "fs.write", arg: path }];
+  }
+  return [{ name: "fs.write", dynamic: true }];
 }

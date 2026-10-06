@@ -1,0 +1,12 @@
+{
+  "permlang": 1,
+  "package": "module",
+  "default": [],
+  "functions": {
+    "Module.register": ["unverifiable"],
+    "Module.registerHooks": ["unverifiable"],
+    "Module.runMain": ["unverifiable"],
+    "Module.require": ["unverifiable"],
+    "Module.constructor": ["unverifiable"]
+  }
+}

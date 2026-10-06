@@ -67,6 +67,24 @@ describe("covers", () => {
     expect(covers([cap("fs.read", ".")], cap("fs.read", "C:\\Windows\\system.ini"))).toBe(false);
     expect(covers([cap("fs.read", "C:\\data")], cap("fs.read", "C:/data/x.json"))).toBe(true);
     expect(covers([cap("fs.read", "C:/data")], cap("fs.read", "C:/data/../../x"))).toBe(false);
+    expect(covers([cap("fs.read", "C:\\data")], cap("fs.read", "c:\\data\\x.json"))).toBe(true);
+  });
+
+  // Found in the 0.3 review: `\\evil\share` normalized to `/evil/share`, and `C:../x` looked relative.
+  it("keeps network shares and drive-relative Windows paths apart from other paths", () => {
+    expect(covers([cap("fs.write", "/evil")], cap("fs.write", "\\\\evil\\share\\x"))).toBe(false);
+    expect(covers([cap("fs.write", "/")], cap("fs.write", "//evil/share/x"))).toBe(false);
+    expect(covers([cap("fs.write", "\\\\evil\\share")], cap("fs.write", "//evil/share/x"))).toBe(true);
+    expect(covers([cap("fs.write", "//evil/share")], cap("fs.write", "//evil/other/x"))).toBe(false);
+    expect(covers([cap("fs.write", "//evil/share")], cap("fs.write", "//evil/share/../other/x"))).toBe(false);
+    // `C:x` is relative to the working directory of drive C, which isn't the program's.
+    expect(covers([cap("fs.read", ".")], cap("fs.read", "C:../x"))).toBe(false);
+    expect(covers([cap("fs.read", ".")], cap("fs.read", "C:x"))).toBe(false);
+    expect(covers([cap("fs.read", "C:/")], cap("fs.read", "C:x"))).toBe(false);
+    expect(covers([cap("fs.read", "C:data")], cap("fs.read", "C:data\\x"))).toBe(true);
+    expect(covers([cap("fs.read", "C:data")], cap("fs.read", "C:data/../../x"))).toBe(false);
+    expect(covers([cap("fs.read", "D:data")], cap("fs.read", "C:data/x"))).toBe(false);
+    expect(covers([cap("fs.read")], cap("fs.read", "\\\\evil\\share\\x"))).toBe(true);
   });
 
   it("does not let one capability stand in for another", () => {

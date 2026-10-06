@@ -7,6 +7,6 @@ declare const options: http.RequestOptions;
 /** @perm net(good.example) */
 export function override() {
   http.request("http://good.example/", { hostname: "evil.example" }); // expect: error PERM001 net(evil.example)
-  http.get("http://good.example/", { host: lookupHost() }); // expect: error PERM001 net
+  http.get("http://good.example/", { hostname: lookupHost() }); // expect: error PERM001 net
   http.request("http://good.example/", options); // expect: error PERM001 net
 }
