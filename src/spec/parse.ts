@@ -74,7 +74,8 @@ export function parseSpecs(text: string, file: string, vocabulary?: ReadonlySet<
     if (spec && !sawPerms) fail(spec.line, `perm ${spec.name} has no perms: section`);
   };
 
-  text.split(/\r?\n/).forEach((raw, i) => {
+  // Editors on Windows may save a byte-order mark, which would hide the first header.
+  text.replace(/^﻿/, "").split(/\r?\n/).forEach((raw, i) => {
     const line = i + 1;
     const trimmed = raw.trim();
     if (trimmed === "" || trimmed.startsWith("#")) return;

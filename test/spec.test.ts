@@ -7,8 +7,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { checkFiles } from "../src/check.js";
-import { checkSpecs } from "../src/spec/check.js";
+import { checkFiles, checkTsConfig } from "../src/check.js";
+import { checkSpecs, formatSpecResults } from "../src/spec/check.js";
 import { parseSpecs } from "../src/spec/parse.js";
 
 const dir = fileURLToPath(new URL("./spec-fixtures/", import.meta.url));
@@ -85,5 +85,86 @@ describe("checking specs against code", () => {
     const { specs: missing } = parseSpecs("perm x()\n  implements: src/refunds.ts#nope\n  perms:\n    net\n", specFile);
     const [result] = checkSpecs(missing, report);
     expect(result!.diagnostics.map((d) => d.code)).toEqual(["SPEC002"]);
+  });
+});
+
+describe("specs that can't be checked as written", () => {
+  // Found in review: a .perm file saved with a byte-order mark failed to parse.
+  it("reads a file that starts with a UTF-8 byte-order mark", () => {
+    const { specs, errors } = parseSpecs("\uFEFFperm x()\n  implements: src/x.ts#x\n  perms:\n    net\n", "bom.perm");
+    expect(errors).toEqual([]);
+    expect(specs.map((s) => s.name)).toEqual(["x"]);
+  });
+
+  // Found in review: with two functions named build, the spec checked the first and ignored the second.
+  describe("an implementation name that matches more than one function", () => {
+    const report = checkFiles([path.join(dir, "src", "reports.ts")], { strictness: "sketch" });
+    const check = (symbol: string, perms = "net(api.example.com)") =>
+      checkSpecs(parseSpecs(`perm build()\n  implements: src/reports.ts#${symbol}\n  perms:\n    ${perms}\n`, specFile).specs, report)[0]!;
+
+    it("fails, and asks for the qualified name", () => {
+      const result = check("build");
+      expect(result.status).toBe("ambiguous");
+      expect(result.diagnostics.map((d) => `${d.severity} ${d.code}`)).toEqual(["error SPEC002"]);
+      expect(result.diagnostics[0]!.message).toBe(
+        "perm build: src/reports.ts#build matches 2 functions: Reports.build (line 5), Admin.build (line 11), so it's not clear which one implements the spec.",
+      );
+      expect(result.diagnostics[0]!.fix).toBe("write the qualified name, such as implements: src/reports.ts#Reports.build.");
+      expect(formatSpecResults([result], dir)).toContain("perms     implementation is ambiguous: write its qualified name");
+    });
+
+    it("checks the one a qualified name picks", () => {
+      expect(check("Reports.build").status).toBe("perms ok");
+      expect(check("Admin.build").diagnostics.map((d) => `${d.code} ${d.capability}`)).toEqual(["SPEC003 exec", "SPEC004 net(api.example.com)"]);
+    });
+
+    it("checks a getter and setter of the same property together", () => {
+      const result = check("Settings.theme");
+      expect(result.status).toBe("perms exceeded");
+      expect(result.diagnostics.filter((d) => d.code === "SPEC003").map((d) => d.capability)).toEqual(["exec"]);
+    });
+  });
+
+  // Found in review: without Node's types, an implementation that runs execSync passed.
+  describe("an implementation that reaches code PermLang can't see", () => {
+    const notypes = path.join(dir, "notypes");
+    const report = checkTsConfig(path.join(notypes, "tsconfig.json"), { strictness: "sketch" });
+    const { specs } = parseSpecs(readFileSync(path.join(notypes, "refund.perm"), "utf8"), path.join(notypes, "refund.perm"));
+    const results = checkSpecs(specs, report);
+    const result = (name: string) => results.find((r) => r.spec.name === name)!;
+
+    it("is unchecked, and fails, naming what can't be seen", () => {
+      const refund = result("process_refund");
+      expect(refund.status).toBe("unchecked");
+      expect(refund.diagnostics.map((d) => `${d.severity} ${d.code}`)).toEqual(["error SPEC005"]);
+      expect(refund.diagnostics[0]!.message).toBe(
+        "perm process_refund: processRefund reaches code PermLang can't see, so its permissions can't be checked: it calls into node:child_process, whose types can't be found.",
+      );
+      expect(refund.diagnostics[0]!.fix).toBe("install the missing types (@types/node for Node's modules and globals, such as process), then run it again.");
+    });
+
+    it("covers globals with no declaration, and code reached through helpers", () => {
+      expect(result("read_key").diagnostics[0]!.message).toMatch(/: it uses process, which has no declaration\.$/);
+      expect(result("refund_and_notify").status).toBe("unchecked");
+      expect(result("refund_and_notify").diagnostics[0]!.message).toMatch(/: it calls into node:child_process, whose types can't be found \(through notifyOps\)\.$/);
+    });
+
+    it("covers import x = require() and import()", () => {
+      expect(result("host_name").diagnostics[0]!.message).toMatch(/: it calls into node:os, whose types can't be found.$/);
+      expect(result("load_plugin").diagnostics[0]!.message).toMatch(/: it calls into untyped-plugin, whose types can't be found.$/);
+    });
+
+    it("doesn't mark an implementation that reaches none of it, even in the same file", () => {
+      expect(result("format_amount").status).toBe("perms ok");
+    });
+
+    it("doesn't report unused permissions it can't confirm", () => {
+      expect(result("read_key").diagnostics.map((d) => d.code)).not.toContain("SPEC004");
+    });
+
+    it("counts as failing in the summary", () => {
+      expect(formatSpecResults(results, notypes)).toContain("6 specs, 5 failing.");
+      expect(formatSpecResults(results, notypes)).toContain("perms     unchecked: reaches code whose types can't be found");
+    });
   });
 });

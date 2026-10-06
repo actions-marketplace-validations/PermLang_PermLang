@@ -1,0 +1,8 @@
+{
+  "permlang": 1,
+  "package": "cheerio",
+  "default": [],
+  "functions": {
+    "fromURL": ["net({host:0})"]
+  }
+}

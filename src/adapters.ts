@@ -19,6 +19,8 @@
 // function. Arguments may use placeholders: `{host:N}` is the host named by
 // argument N (a URL, or an options object with url/hostname/host), and `{arg:N}`
 // is argument N as a literal string. Either is dynamic when it can't be known.
+// `{host:N+}` lets a later options argument replace the host, and `{host:N?}` is
+// left out unless argument N can set one (Stripe's config can name another host).
 
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
@@ -30,7 +32,7 @@ import { containerName, hostOf, literalString } from "./detect/shared.js";
 interface Template {
   name: string;
   /** A literal scope, or a placeholder filled from the call's arguments. */
-  arg?: string | { kind: "host" | "arg"; index: number; overridable?: boolean };
+  arg?: string | { kind: "host" | "arg"; index: number; overridable?: boolean; optional?: boolean };
 }
 
 export interface Adapter {
@@ -55,7 +57,7 @@ export class AdapterError extends Error {
 }
 
 const FIELDS = new Set(["$schema", "permlang", "package", "defines", "default", "functions"]);
-const PLACEHOLDER = /^\{(host|arg):(\d+)(\+)?\}$/;
+const PLACEHOLDER = /^\{(host|arg):(\d+)([+?])?\}$/;
 const TEMPLATE = /^([^()]+)(?:\((.*)\))?$/;
 
 /** @perm fs.read */
@@ -159,15 +161,18 @@ function parseTemplate(text: string, vocabulary: ReadonlySet<string>): Template 
   const [, name, arg] = match as unknown as [string, string, string | undefined];
   const placeholder = arg === undefined ? undefined : PLACEHOLDER.exec(arg.trim());
   if (arg !== undefined && arg.includes("{") && !placeholder) {
-    return { error: "has an invalid placeholder; use {host:N}, {host:N+}, or {arg:N}" };
+    return { error: "has an invalid placeholder; use {host:N}, {host:N+}, {host:N?}, or {arg:N}" };
   }
   // Validate the rest with the same grammar as @perm, standing a value in for any placeholder.
   const { errors } = parsePermList(placeholder ? `${name}(x)` : text, vocabulary);
   if (errors.length > 0) return { error: errors[0]!.reason };
   if (placeholder) {
     const kind = placeholder[1] as "host" | "arg";
-    if (placeholder[3] && kind !== "host") return { error: "can't use +: only {host:N+} can be overridden by later arguments" };
-    return { name, arg: { kind, index: Number(placeholder[2]), ...(placeholder[3] ? { overridable: true } : {}) } };
+    const mark = placeholder[3];
+    if (mark === "+" && kind !== "host") return { error: "can't use +: only {host:N+} can be overridden by later arguments" };
+    if (mark === "?" && kind !== "host") return { error: "can't use ?: only {host:N?} can be left out" };
+    const flag = mark === "+" ? { overridable: true } : mark === "?" ? { optional: true } : {};
+    return { name, arg: { kind, index: Number(placeholder[2]), ...flag } };
   }
   return arg === undefined ? { name } : { name, arg: arg.trim() };
 }
@@ -203,7 +208,7 @@ export class AdapterIndex {
     const listed = key === undefined ? undefined : adapters.find((a) => a.functions.has(key))?.functions.get(key);
     const isConstructor = Node.isConstructorDeclaration(declaration) || Node.isConstructSignatureDeclaration(declaration);
     const templates = listed ?? (isConstructor ? undefined : adapters.find((a) => a.default)?.default);
-    return (templates ?? []).map((t) => instantiate(t, args));
+    return (templates ?? []).flatMap((t) => (typeof t.arg === "object" && t.arg.optional ? configHost(t.name, args[t.arg.index]) : [instantiate(t, args)]));
   }
 }
 
@@ -273,4 +278,24 @@ function functionKey(d: Node): string | undefined {
   const container = containerName(named);
   if (!container) return member === "()" ? undefined : member;
   return member === "()" ? `${container}()` : `${container}.${member}`;
+}
+
+/**
+ * {host:N?}: the host a client's config sends to, as Stripe's `{ host }` does, only
+ * when the config can set one. A config that isn't written out (a variable, a
+ * spread, a computed key) could, so its host is unknown.
+ */
+function configHost(name: string, written: Node | undefined): Capability[] {
+  let config = written;
+  while (config && (Node.isAsExpression(config) || Node.isSatisfiesExpression(config) || Node.isParenthesizedExpression(config))) config = config.getExpression();
+  if (!config || config.getType().getCallSignatures().length > 0) return [];
+  if (!Node.isObjectLiteralExpression(config)) return config.getType().isObject() ? [{ name, dynamic: true }] : [];
+  const setsHost = config.getProperties().some((p) => {
+    if (!Node.isPropertyAssignment(p) && !Node.isShorthandPropertyAssignment(p)) return true;
+    const key = p.getNameNode();
+    return Node.isComputedPropertyName(key) || ["host", "hostname", "url"].includes(Node.isStringLiteral(key) ? key.getLiteralValue() : key.getText());
+  });
+  if (!setsHost) return [];
+  const host = hostOf(config);
+  return [host === undefined ? { name, dynamic: true } : { name, arg: host }];
 }

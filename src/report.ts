@@ -15,9 +15,10 @@ const RULES: Record<Diagnostic["code"], string> = {
   PERM008: "A tool an AI model can call reaches something dangerous, such as running commands or writing data.",
   PERM009: "A function reads data a flow rule protects and can send it somewhere the rule doesn't allow.",
   SPEC001: "A .perm spec file is invalid.",
-  SPEC002: "A .perm spec's implementation can't be found.",
+  SPEC002: "A .perm spec's implementation can't be found, or its name matches more than one function.",
   SPEC003: "A spec's implementation reaches something its perms don't allow.",
   SPEC004: "A spec allows a permission its implementation never uses.",
+  SPEC005: "A spec's implementation reaches code PermLang can't see, such as an import whose types can't be found, so it can't be checked.",
 };
 const HELP = "https://github.com/PermLang/PermLang/blob/main/docs/reference.md#diagnostic-codes";
 

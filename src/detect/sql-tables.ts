@@ -6,6 +6,8 @@
 // version gave confident wrong answers for comma joins, quotes inside identifiers,
 // MySQL comments, and more (found in review); this one tokenizes first, so quotes
 // and comments are handled exactly once, and rejects whatever it doesn't expect.
+// Where dialects read the same text differently (MySQL's `--` and double quotes,
+// executable comments), it is unknown: one of them could read more tables.
 
 export interface SqlTables {
   read: string[];
@@ -37,6 +39,10 @@ type Token =
   | { kind: "param" } // $1, ?, :name, @name
   | { kind: "punct"; text: string };
 
+// [order details] is a name in SQLite and SQL Server; any other bracket is an array
+// subscript or constructor (Postgres), whose contents are read like the rest.
+const BRACKETED_NAME = /^\[[A-Za-z_][\w $]*\]/;
+
 function tokenize(sql: string): Token[] {
   const tokens: Token[] = [];
   let i = 0;
@@ -46,31 +52,39 @@ function tokenize(sql: string): Token[] {
     if (c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f" || c === "\v") {
       i++;
     } else if (c === "-" && at(1) === "-") {
-      while (i < sql.length && at() !== "\n") i++;
+      // MySQL needs ASCII whitespace or a control character after --: there, `1--1`
+      // is 1 minus -1 and the line goes on.
+      if (i + 2 < sql.length && !/[\x00-\x20]/.test(at(2))) unknown();
+      // Postgres also ends the comment at a lone \r, which MySQL and SQLite don't.
+      while (i < sql.length && at() !== "\n") {
+        if (at() === "\r" && at(1) !== "\n") unknown();
+        i++;
+      }
     } else if (c === "/" && at(1) === "*") {
-      // MySQL runs /*! ... */ as SQL; nesting differs by dialect.
-      if (at(2) === "!" || at(2) === "+") unknown();
+      // MySQL runs /*! ... */ and MariaDB /*M! ... */ as SQL; nesting differs by dialect.
+      if (at(2) === "!" || at(2) === "+" || (at(2) === "M" && at(3) === "!")) unknown();
       const end = sql.indexOf("*/", i + 2);
       if (end === -1 || sql.slice(i + 2, end).includes("/*")) unknown();
       i = end + 2;
     } else if (c === "#") {
       unknown(); // a MySQL comment, or a Postgres operator: dialect-dependent
     } else if (c === "'") {
-      // Prefixed strings (E'...', U&'...') and backslashes change escaping by dialect.
+      // E'...' strings and backslashes change escaping by dialect.
       const prev = tokens[tokens.length - 1];
-      if (prev?.kind === "word" && /^(E|U&)$/i.test(prev.text) && sql[i - 1] !== " ") unknown();
+      if (prev?.kind === "word" && /^E$/i.test(prev.text) && sql[i - 1] !== " ") unknown();
       const end = endOfQuoted(sql, i, "'", "'");
       if (sql.slice(i + 1, end - 1).includes("\\")) unknown();
       i = end;
       tokens.push({ kind: "string" });
     } else if (c === '"' || c === "`") {
+      // U&"..." names a table other than the one written (Postgres unicode escapes).
+      if (c === '"' && sql[i - 1] === "&") unknown();
       const end = endOfQuoted(sql, i, c, c);
-      tokens.push({ kind: "ident", text: sql.slice(i + 1, end - 1).replaceAll(c + c, c) });
+      tokens.push({ kind: "ident", text: quotedName(sql.slice(i + 1, end - 1).replaceAll(c + c, c)) });
       i = end;
-    } else if (c === "[") {
-      const end = sql.indexOf("]", i + 1);
-      if (end === -1) unknown();
-      tokens.push({ kind: "ident", text: sql.slice(i + 1, end) });
+    } else if (c === "[" && BRACKETED_NAME.test(sql.slice(i, i + 130))) {
+      const end = sql.indexOf("]", i);
+      tokens.push({ kind: "ident", text: quotedName(sql.slice(i + 1, end)) });
       i = end + 1;
     } else if (c === "$") {
       const m = /^\$\d+/.exec(sql.slice(i));
@@ -89,7 +103,7 @@ function tokenize(sql: string): Token[] {
       const m = /^[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?/.exec(sql.slice(i))!;
       tokens.push({ kind: "number" });
       i += m[0].length;
-    } else if ("(),.;=<>!+-*/%|&^~:".includes(c)) {
+    } else if ("(),.;=<>!+-*/%|&^~:[]".includes(c)) {
       tokens.push({ kind: "punct", text: c });
       i++;
     } else {
@@ -97,6 +111,18 @@ function tokenize(sql: string): Token[] {
     }
   }
   return tokens;
+}
+
+/**
+ * A quoted name, when it can be reported as written. One that is empty, has spaces
+ * at its ends, or holds a dot, comma, parenthesis, or control character could pass
+ * for another name (the table "audit.log" isn't schema audit's log) or couldn't be
+ * declared in @perm. A backslash is unknown too: MySQL reads "a\" ..." as a string
+ * whose backslash escapes the quote, so the text after it is still in the string.
+ */
+function quotedName(text: string): string {
+  if (text === "" || text.trim() !== text || /[\x00-\x1f.,()*\\]/.test(text)) unknown();
+  return text;
 }
 
 /** The index after a quoted run starting at `start`; a doubled quote is an escaped quote. */
@@ -122,7 +148,9 @@ const CLAUSE_END = new Set(["WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSE
 const JOIN_WORDS = new Set(["NATURAL", "LEFT", "RIGHT", "FULL", "OUTER", "INNER", "CROSS", "JOIN", "STRAIGHT_JOIN"]);
 // Words that can't be a table alias.
 const RESERVED = new Set([...CLAUSE_END, ...JOIN_WORDS, ...REJECT, "USING", "SELECT", "FROM", "VALUES", "AND", "OR", "NOT", "AS", "WHEN", "THEN", "ELSE", "END", "CONFLICT", "DUPLICATE"]);
-// Calls known not to touch other tables, files, or state. Anything else is unknown.
+// Calls known not to touch other tables, files, or state. Anything else is unknown,
+// as is any of these qualified by a schema or quoted (`evil.lower(x)`, `"lower"(x)`),
+// which can be a function of the same name that does.
 const PURE_CALLS = new Set([
   "COUNT", "SUM", "AVG", "MIN", "MAX", "COALESCE", "NULLIF", "GREATEST", "LEAST", "IFNULL", "NVL", "IF",
   "LOWER", "UPPER", "LENGTH", "CHAR_LENGTH", "TRIM", "LTRIM", "RTRIM", "SUBSTRING", "SUBSTR", "CONCAT",
@@ -140,6 +168,8 @@ const GROUPING_KEYWORDS = new Set([
 ]);
 // FROM inside these calls is part of the call: EXTRACT(YEAR FROM d).
 const CALLS_WITH_FROM = new Set(["EXTRACT", "SUBSTRING", "TRIM", "OVERLAY", "POSITION"]);
+// Deeper nesting is unknown, which also keeps the recursion off the stack's limit.
+const MAX_DEPTH = 64;
 
 function analyze(all: Token[]): SqlTables {
   // One statement, with an optional trailing semicolon.
@@ -154,6 +184,7 @@ function analyze(all: Token[]): SqlTables {
   const match = matchParens(tokens);
   const read: string[] = [];
   const write: string[] = [];
+  let depth = 0;
   const word = (i: number) => (tokens[i]?.kind === "word" ? (tokens[i] as { upper: string }).upper : undefined);
   const isPunct = (i: number, text: string) => tokens[i]?.kind === "punct" && (tokens[i] as { text: string }).text === text;
 
@@ -173,13 +204,24 @@ function analyze(all: Token[]): SqlTables {
     return [parts.join("."), i];
   };
 
+  /** A parenthesized list of names at i, `(a, "b", c)`; returns the index after it. Anything else in it is unknown. */
+  const nameList = (i: number): number => {
+    const close = match[i]!;
+    for (let j = i + 1; j < close; j++) {
+      const t = tokens[j]!;
+      const isName = t.kind === "ident" || (t.kind === "word" && !RESERVED.has(t.upper));
+      if ((j - i) % 2 === 1 ? !isName : !isPunct(j, ",")) unknown();
+    }
+    return close + 1;
+  };
+
   /** An optional alias, `AS x` or `x`, possibly with a column list. */
   const alias = (i: number): number => {
     if (word(i) === "AS") i++;
     const t = tokens[i];
     if (t?.kind === "ident" || (t?.kind === "word" && !RESERVED.has(t.upper))) {
       i++;
-      if (isPunct(i, "(")) i = match[i]! + 1;
+      if (isPunct(i, "(")) i = nameList(i);
     } else if (tokens[i - 1] && word(i - 1) === "AS") {
       unknown();
     }
@@ -214,7 +256,7 @@ function analyze(all: Token[]): SqlTables {
         i = factor(i + 1, end);
         if (word(i) === "USING") {
           if (!isPunct(i + 1, "(")) unknown();
-          i = match[i + 1]! + 1;
+          i = nameList(i + 1);
         }
       } else if (w === "ON") {
         // The join condition runs to the next join, comma, or clause at this depth.
@@ -235,10 +277,13 @@ function analyze(all: Token[]): SqlTables {
 
   /** Checks tokens [start, end) at one depth; `call` is the function whose arguments these are. */
   const scan = (start: number, end: number, call: string | undefined): void => {
+    if (++depth > MAX_DEPTH) unknown();
     for (let i = start; i < end; i++) {
       const t = tokens[i]!;
       if (t.kind === "punct" && t.text === "(") {
         const prev = tokens[i - 1];
+        // A quoted or schema-qualified name before "(" is a call to a function PermLang can't know.
+        if (prev?.kind === "ident" || (prev?.kind === "word" && isPunct(i - 2, "."))) unknown();
         const name = prev?.kind === "word" && !GROUPING_KEYWORDS.has(prev.upper) ? prev.upper : undefined;
         if (name !== undefined && !PURE_CALLS.has(name)) unknown();
         scan(i + 1, match[i]!, name);
@@ -255,6 +300,7 @@ function analyze(all: Token[]): SqlTables {
         i = fromClause(i + 1, end) - 1;
       }
     }
+    depth--;
   };
 
   const first = word(0);
@@ -269,7 +315,8 @@ function analyze(all: Token[]): SqlTables {
     write.push(name);
     i = next;
     if (word(i) === "AS") i = alias(i);
-    if (isPunct(i, "(")) i = match[i]! + 1; // column list
+    // A column list, never the source: INSERT INTO a (SELECT * FROM b) is unknown.
+    if (isPunct(i, "(")) i = nameList(i);
     scan(i, tokens.length, undefined);
   } else if (first === "UPDATE") {
     while (word(i) && ["LOW_PRIORITY", "IGNORE", "ONLY"].includes(word(i)!)) i++;

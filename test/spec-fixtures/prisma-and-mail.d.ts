@@ -1,5 +1,5 @@
-// Stand-ins for the fixture's libraries. The file name contains "prisma", as a real
-// generated client's path does, which is how Prisma's typings are recognized.
+// Stand-ins for the fixture's libraries. Declaring the module "@prisma/client" makes
+// these Prisma's typings, as its package does for a real generated client.
 declare module "@prisma/client" {
   export namespace Prisma {
     interface OrdersDelegate {

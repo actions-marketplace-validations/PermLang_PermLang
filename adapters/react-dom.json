@@ -1,0 +1,13 @@
+{
+  "permlang": 1,
+  "package": "react-dom",
+  "default": [],
+  "functions": {
+    "preinit": ["net({host:0})", "unverifiable"],
+    "preinitModule": ["net({host:0})", "unverifiable"],
+    "preload": ["net({host:0})"],
+    "preloadModule": ["net({host:0})"],
+    "preconnect": ["net({host:0})"],
+    "prefetchDNS": ["net({host:0})"]
+  }
+}

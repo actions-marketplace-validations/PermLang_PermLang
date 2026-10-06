@@ -36,13 +36,19 @@ perm process_refund(order: Order, reason: Text) -> RefundResult
   of specs.
 - **Sections** are indented under the header. Their content is indented further.
 - **`implements: path#function`**: the code that implements the spec. The path is
-  relative to the `.perm` file.
+  relative to the `.perm` file. A method is `Class.method`. When the name matches
+  more than one function in the file (`build` in two namespaces, say), the check
+  fails until you write the qualified name, with the namespaces and functions it's
+  declared in: `src/reports.ts#Reports.build`. A getter and a setter of the same
+  property are checked together.
 - **`must:`**: one rule per line, in plain language.
 - **`examples:`**: one per line, as `input -> expected`.
 - **`perms:`**: the capabilities the implementation may reach, in the same
   syntax as `@perm`. Commas separate entries, and entries can span lines.
   Required.
 - **`#`** starts a comment line.
+
+Files are UTF-8, and may start with a byte-order mark.
 
 ## Checking
 
@@ -61,13 +67,31 @@ perm process_refund  src/refunds.ts#processRefund
 | Code | Meaning |
 | --- | --- |
 | SPEC001 | The spec file is invalid. |
-| SPEC002 | The `implements:` function wasn't found among the checked files. |
+| SPEC002 | The `implements:` function wasn't found among the checked files, or its name matches more than one function. |
 | SPEC003 | The implementation reaches something `perms:` doesn't allow. The check fails. |
 | SPEC004 | `perms:` allows something the implementation never uses (a warning, to keep specs minimal). |
+| SPEC005 | The implementation reaches code PermLang can't see, so its permissions can't be checked. The check fails. |
 
 The implementation's reach is computed exactly as for `permlang check`, through
 helpers, adapters, and the whole call graph. A spec's `perms:` is a separate
 declaration from any `@perm` on the function; both are checked.
+
+A spec never passes on code PermLang can't see. If the implementation, or
+anything it calls, uses an import whose types can't be found or a name with no
+declaration (Node's `child_process` or `process` without `@types/node`, say), its
+access is invisible, so the spec is **unchecked** (`SPEC005`) and the check fails:
+
+```
+perm process_refund  src/refunds.ts#processRefund
+  perms     unchecked: reaches code whose types can't be found
+  ...
+  refunds.perm:2 error SPEC005: perm process_refund: processRefund reaches code PermLang can't see, so its permissions can't be checked: it calls into node:child_process, whose types can't be found.
+    -> install the missing types (@types/node for Node's modules and globals, such as process), then run it again.
+```
+
+Unused permissions aren't reported for an unchecked spec, since the code that
+can't be seen may use them. Calls into packages with no adapter are trusted, as
+in `permlang check`, which lists them.
 
 ## What comes next
 

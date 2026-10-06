@@ -1,6 +1,6 @@
 {
   "permlang": 1,
-  "package": ["@modelcontextprotocol/client", "@modelcontextprotocol/sdk"],
+  "package": ["@modelcontextprotocol/client", "@modelcontextprotocol/core", "@modelcontextprotocol/sdk", "@modelcontextprotocol/server"],
   "default": [],
   "functions": {
     "StreamableHTTPClientTransport.constructor": ["net({host:0})"],

@@ -1,0 +1,29 @@
+perm process_refund(id: Text) -> Result
+  implements: refund.ts#processRefund
+  perms:
+    db.write(refunds)
+
+perm read_key() -> Text
+  implements: refund.ts#readKey
+  perms:
+    env(REFUND_KEY)
+
+perm refund_and_notify(id: Text)
+  implements: refund.ts#refundAndNotify
+  perms:
+    net(ops.example)
+
+perm format_amount(cents: Number) -> Text
+  implements: refund.ts#formatAmount
+  perms:
+    net(unused.example)
+
+perm host_name() -> Text
+  implements: refund.ts#hostName
+  perms:
+    env(HOSTNAME)
+
+perm load_plugin()
+  implements: refund.ts#loadPlugin
+  perms:
+    fs.read(./plugins)

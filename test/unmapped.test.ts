@@ -38,9 +38,10 @@ describe("packages without adapters", () => {
     expect(run({ unmapped: "trust" }).unmapped).toHaveLength(1);
   });
 
-  it("never fails the build in sketch", () => {
-    const d = run({ unmapped: "error", strictness: "sketch" }).diagnostics.filter((x) => x.code === "PERM006");
-    expect(d.map((x) => x.severity)).toEqual(["warning"]);
+  // Found in review: sketch, which init sets up, turned an explicit "error" into a warning.
+  it("keeps an explicit error policy at sketch, and warns by default", () => {
+    expect(run({ unmapped: "error", strictness: "sketch" }).diagnostics.filter((x) => x.code === "PERM006").map((x) => x.severity)).toEqual(["error"]);
+    expect(run({ strictness: "sketch" }).diagnostics.filter((x) => x.code === "PERM006").map((x) => x.severity)).toEqual(["warning"]);
   });
 
   it("doesn't count packages declared pure", () => {
@@ -70,5 +71,6 @@ describe("imports whose types can't be found", () => {
   it("follows the unmapped policy", () => {
     expect(report({ unmapped: "error" }).diagnostics.filter((x) => x.code === "PERM007").every((x) => x.severity === "error")).toBe(true);
     expect(report({ unmapped: "trust" }).diagnostics.filter((x) => x.code === "PERM007")).toEqual([]);
+    expect(report({ unmapped: "error", strictness: "sketch" }).diagnostics.filter((x) => x.code === "PERM007").map((x) => x.severity)).toEqual(["error", "error"]);
   });
 });

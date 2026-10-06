@@ -22,11 +22,9 @@ export function declarationCapabilities(
   if (runsArbitraryCode(declaration)) return [{ name: UNVERIFIABLE }];
   const fs = fsFunctionName(declaration);
   if (fs !== undefined) return fsCapabilities(fs, args);
-  for (const database of [prismaCapabilities, sqlCapabilities, drizzleCapabilities]) {
-    const db = database(declaration, call);
-    if (db.length > 0) return db;
-  }
-  return adapters.forDeclaration(declaration, args);
+  // Database clients are recognized by their own packages; adapters still apply on top.
+  const db = [prismaCapabilities, sqlCapabilities, drizzleCapabilities].flatMap((database) => database(declaration, call));
+  return [...db, ...adapters.forDeclaration(declaration, args)];
 }
 
 /**

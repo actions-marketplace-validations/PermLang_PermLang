@@ -12,10 +12,10 @@ import { detectInFile } from "./detect/index.js";
 import { Hierarchy } from "./dispatch.js";
 import { buildLock, lockDrift, type LockFile } from "./lock.js";
 import { projectFiles } from "./project-files.js";
-import { findTools, type ToolRegistration } from "./tools.js";
+import { findTools, handlerReach } from "./tools.js";
 import { flowDiagnostics, type FlowRule } from "./flows.js";
-import { resolveAlias } from "./detect/shared.js";
 import { unmappedPackages, unresolvedImports, type UnmappedPackage } from "./unmapped.js";
+import { unseenFrom } from "./unseen.js";
 import { collectEdges, pathTo, propagate, type Edge, type Reach } from "./graph.js";
 import {
   createUnit,
@@ -26,16 +26,18 @@ import {
   isInNodeModules,
   isUnitNode,
   readModuleAnnotation,
-  unitNodeForDeclaration,
-  unitNodeForSymbol,
   type Unit,
   type Use,
 } from "./units.js";
 
 export type Severity = "error" | "warning";
 
-/** Spec diagnostics: SPEC001 invalid spec, SPEC002 implementation not found, SPEC003 reaches beyond the spec, SPEC004 unused permission. */
-export type SpecCode = "SPEC001" | "SPEC002" | "SPEC003" | "SPEC004";
+/**
+ * Spec diagnostics: SPEC001 invalid spec, SPEC002 implementation not found (or the name matches
+ * more than one function), SPEC003 reaches beyond the spec, SPEC004 unused permission, SPEC005
+ * the implementation reaches code PermLang can't see, so it can't be checked.
+ */
+export type SpecCode = "SPEC001" | "SPEC002" | "SPEC003" | "SPEC004" | "SPEC005";
 
 export interface Diagnostic {
   severity: Severity;
@@ -45,7 +47,7 @@ export interface Diagnostic {
    * PERM005 permissions that differ from permlang.lock.json, PERM006 calls into a
    * package with no adapter (what it touches isn't checked), PERM007 an import
    * whose types can't be found (nothing called from it is checked), PERM008 a tool an AI
-   * model can call reaches something dangerous, PERM009 a function reads something a
+   * model can call reaches something dangerous, PERM009 a function gets hold of something a
    * flow rule protects and can send it somewhere the rule doesn't allow.
    */
   code: "PERM001" | "PERM002" | "PERM003" | "PERM004" | "PERM005" | "PERM006" | "PERM007" | "PERM008" | "PERM009" | SpecCode;
@@ -108,21 +110,37 @@ export interface Report {
   /** Imported modules whose types can't be found, so nothing called from them is checked. */
   unresolved: string[];
   /** Every function analyzed, including those that reach nothing (which `functions` leaves out). */
-  units: { file: string; name: string; line: number }[];
+  units: {
+    file: string;
+    name: string;
+    line: number;
+    /** The name with what it's declared in: `Reports.build` for a function in `namespace Reports`. */
+    qualified: string;
+    /**
+     * Why some of what it runs can't be seen: imports whose types can't be found, names with no
+     * declaration. Worked out on demand (it needs TypeScript's full diagnostics), for `permlang spec`.
+     */
+    unseen: () => string[];
+  }[];
   /** Functions registered as tools an AI model can call. */
   tools: ToolReport[];
 }
 
 /**
  * How strictly annotations are enforced (design doc §7). An out-of-date lock
- * file fails at every level: it is the review gate, not an annotation rule.
- *   sketch       permissions are inferred and reported; nothing else fails
+ * file fails at every level: it is the review gate, not an annotation rule. So do
+ * flow rules, and "error" policies for unmapped packages and AI tools: they are
+ * asked for explicitly in the configuration.
+ *   sketch       permissions are inferred and reported; annotation rules don't fail
  *   development  exported functions and entry points must declare what they reach (default)
  *   production   every function must be covered by function- or module-level @perm
  */
 export type Strictness = "sketch" | "development" | "production";
 
 export const STRICTNESS_LEVELS: readonly Strictness[] = ["sketch", "development", "production"];
+
+/** The rules about @perm annotations, which sketch reports as warnings. */
+const ANNOTATION_RULES: ReadonlySet<Diagnostic["code"]> = new Set(["PERM001", "PERM002", "PERM003", "PERM004"]);
 
 export interface CheckOptions {
   /** Team adapter manifests, loaded before (and taking precedence over) the built-in ones. */
@@ -274,18 +292,23 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
   // Tools an AI model can call: listed always; a diagnostic when they reach something dangerous.
   const tools: ToolReport[] = [];
   const toolPolicy = options.tools ?? "warn";
+  const registered = new Set<Node>();
   for (const sourceFile of sourceFiles) {
     for (const t of findTools(sourceFile)) {
-      const registrar = units.get(enclosingUnitNode(t.call))!;
-      const reaches = [...toolReach(t, registrar, units, reach, edgesFrom.get(registrar) ?? [])].sort();
-      const { line, column } = sourceFile.getLineAndColumnAtPos(t.call.getStart());
-      tools.push({ name: t.name, framework: t.framework, file: sourceFile.getFilePath(), line, function: registrar.name, reaches });
+      // A `tools` object shared by several calls is registered once.
+      if (registered.has(t.site)) continue;
+      registered.add(t.site);
+      const registrar = units.get(enclosingUnitNode(t.site))!;
+      const reaches = [...handlerReach(t, { units, reach, edgesFrom })].sort();
+      const file = t.site.getSourceFile();
+      const { line, column } = file.getLineAndColumnAtPos(t.site.getStart());
+      tools.push({ name: t.name, framework: t.framework, file: file.getFilePath(), line, function: registrar.name, reaches });
       const risky = reaches.filter(isRiskyForTools);
       if (toolPolicy === "trust" || risky.length === 0) continue;
       diagnostics.push({
         severity: toolPolicy === "error" ? "error" : "warning",
         code: "PERM008",
-        file: sourceFile.getFilePath(),
+        file: file.getFilePath(),
         line,
         column,
         function: registrar.name,
@@ -298,10 +321,11 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
   }
 
   // Data-flow rules: a function that reads protected data and can send it elsewhere.
-  if (options.flows && options.flows.length > 0) diagnostics.push(...flowDiagnostics(units.values(), reach, options.flows));
+  if (options.flows && options.flows.length > 0) diagnostics.push(...flowDiagnostics(units.values(), edges, reach, options.flows));
 
-  // Sketch reports everything but fails nothing.
-  const checked = strictness === "sketch" ? diagnostics.map((d) => ({ ...d, severity: "warning" as const })) : diagnostics;
+  // Sketch relaxes the annotation rules only. What the configuration asks for explicitly (flow
+  // rules, and "error" for unmapped packages or AI tools) fails at every level.
+  const checked = strictness === "sketch" ? diagnostics.map((d) => (ANNOTATION_RULES.has(d.code) ? { ...d, severity: "warning" as const } : d)) : diagnostics;
   const report: Report = {
     files: sourceFiles.length,
     functions,
@@ -309,7 +333,13 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
     unsafe,
     unmapped,
     unresolved: unresolved.map((u) => u.specifier).sort(),
-    units: [...units.values()].map((u) => ({ file: u.file, name: u.name, line: u.line })),
+    units: [...units.values()].map((u) => ({
+      file: u.file,
+      name: u.name,
+      line: u.line,
+      qualified: qualifiedName(u, units),
+      unseen: () => unseenFrom(u, edgesFrom, (node) => units.get(node)),
+    })),
     tools,
   };
   if (options.lock) {
@@ -323,41 +353,29 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
 // --- tools -------------------------------------------------------------------
 
 /**
- * What a tool's handler can reach. A handler that is a unit (a named function, a method, a
- * function-valued property) reaches what that unit reaches. An inline callback isn't a unit:
- * its uses and calls are charged to the code around it, so those inside its body count.
- * A handler that can't be found could be anything.
- */
-function toolReach(tool: ToolRegistration, registrar: Unit, units: Map<Node, Unit>, reach: Reach, edges: readonly Edge[]): Set<string> {
-  const handler = tool.handler;
-  if (!handler) return new Set([UNVERIFIABLE]);
-  const named = Node.isIdentifier(handler) || Node.isPropertyAccessExpression(handler) ? handler.getSymbol() : undefined;
-  const unitNode = named ? unitNodeForSymbol(resolveAlias(named)) : unitNodeForDeclaration(handler);
-  const unit = unitNode && units.get(unitNode);
-  if (unit) return new Set(reach.get(unit)!.keys());
-  if (named || (!Node.isArrowFunction(handler) && !Node.isFunctionExpression(handler))) return new Set([UNVERIFIABLE]);
-
-  const sf = handler.getSourceFile();
-  const start = sf.getLineAndColumnAtPos(handler.getStart());
-  const end = sf.getLineAndColumnAtPos(handler.getEnd());
-  const inside = (p: { line: number; column: number }) =>
-    (p.line > start.line || (p.line === start.line && p.column >= start.column)) && (p.line < end.line || (p.line === end.line && p.column <= end.column));
-  const out = new Set<string>();
-  for (const use of registrar.uses) if (inside(use)) out.add(formatCapability(use.capability));
-  for (const edge of edges) if (inside(edge)) for (const key of reach.get(edge.to)!.keys()) out.add(key);
-  return out;
-}
-
-/**
  * What a model shouldn't be able to trigger unchecked: running code or commands, writing
- * files or data, sending to a host that isn't fixed, and actions adapters define
- * (`payments.refund`, `email.send`). Reading from a known host or a table is what tools are for.
+ * files or data, sending to a host that isn't fixed, reading a file, table, or variable that
+ * isn't fixed, and actions adapters define (`payments.refund`, `email.send`). Reading from a
+ * known host, file, table, or variable is what tools are for.
  */
 export function isRiskyForTools(capability: string): boolean {
-  // Bare `net` is any host: the model can choose where data goes.
-  if (capability === "net") return true;
+  // Without a scope, the model can choose: where data goes (`net`), or which file, table, or
+  // secret it reads back (`fs.read`, `db.read`, `env`, which is also the whole environment).
+  if (["net", "fs.read", "db.read", "env"].includes(capability)) return true;
   // Everything else is risky except reads: exec, writes, unverifiable code, and app-level actions.
   return !["net", "fs.read", "db.read", "env"].includes(capability.split("(")[0]!);
+}
+
+/** A unit's name with the namespaces and functions it's declared in, outermost first: `Reports.build`. */
+function qualifiedName(unit: Unit, units: ReadonlyMap<Node, Unit>): string {
+  const outer: string[] = [];
+  for (const a of unit.node.getAncestors()) {
+    // A method's name already has its class.
+    if (Node.isClassDeclaration(a) || Node.isClassExpression(a)) continue;
+    if (Node.isModuleDeclaration(a) && !Node.isStringLiteral(a.getNameNode())) outer.unshift(a.getName());
+    else if (!Node.isSourceFile(a) && units.has(a)) outer.unshift(units.get(a)!.name);
+  }
+  return [...outer, unit.name].join(".");
 }
 
 // --- diagnostics -------------------------------------------------------------

@@ -1,7 +1,8 @@
 // Strictness levels (design doc §7), set in permlang.config.json:
-//   sketch       permissions are inferred and reported; nothing fails
+//   sketch       permissions are inferred and reported; annotation rules don't fail
 //   development  exported functions and entry points must declare what they reach
 //   production   every function must be covered by function- or module-level @perm
+// A stale lock, flow rules, and "error" policies fail at every level.
 
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -42,5 +43,14 @@ describe("strictness levels", () => {
 
   it("defaults to development", () => {
     expect(summary(undefined)).toEqual(summary("development"));
+  });
+
+  it("relaxes only the annotation rules at sketch: a flow rule, asked for explicitly, still fails", () => {
+    const explicit = fileURLToPath(new URL("./strictness-fixtures/explicit.ts", import.meta.url));
+    const flows = [{ from: { name: "env", arg: "TOKEN" }, to: [{ name: "net", arg: "api.example.com" }] }];
+    const at = (strictness: Strictness) =>
+      checkFiles([explicit], { strictness, flows }).diagnostics.map((d) => `${d.severity} ${d.code} ${d.function}`).sort();
+    expect(at("sketch")).toEqual(["error PERM009 leaks", "warning PERM004 runs"]);
+    expect(at("development")).toEqual(["error PERM004 runs", "error PERM009 leaks"]);
   });
 });

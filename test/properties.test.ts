@@ -4,12 +4,13 @@
 // workflow commands, deciding whether a declared permission covers a use, and reading the lock
 // and workflow files the review gate relies on.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import fc from "fast-check";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { isMap, parseDocument, stringify } from "yaml";
+import { Document, isAlias, isMap, parseDocument, stringify, visit, type Node as YamlNode, type Scalar } from "yaml";
 import { BUILTIN_CAPABILITIES, BUILTIN_VOCABULARY, covers, formatCapability, parsePermList, type Capability } from "../src/capability.js";
 import type { Diagnostic, Report } from "../src/check.js";
 import { sqlTables } from "../src/detect/sql-tables.js";
@@ -203,6 +204,101 @@ describe("SQL table reader", () => {
       }),
     );
   });
+
+  // A subquery that reads `secrets`, wrapped in shapes that each still run it in at
+  // least one of Postgres, MySQL, MariaDB, or SQLite. Whatever the reader answers
+  // must include it: a definite answer without it is a silent pass.
+  const secret = fc.constantFrom(
+    "(SELECT max(id) FROM secrets)",
+    '(SELECT id FROM "secrets")',
+    "(SELECT id FROM `secrets`)",
+    "(SELECT id FROM [secrets])",
+    "(SELECT 1 FROM leads JOIN secrets ON 1 = 1)",
+    "(SELECT a FROM leads, secrets)",
+    "(SELECT x FROM (SELECT x FROM secrets) s)",
+  );
+  const wrapper = fc.constantFrom<(s: string) => string>(
+    (s) => `(${s})`,
+    (s) => `lower(${s})`,
+    (s) => `coalesce(${s}, 0)`,
+    (s) => `CAST(${s} AS int)`,
+    (s) => `ROW(${s})`,
+    (s) => `"f"(${s})`, // a quoted function name
+    (s) => `evil.lower(${s})`, // a schema-qualified one
+    (s) => `pg_catalog.count(${s})`,
+    (s) => `tags[${s}]`, // a Postgres array subscript
+    (s) => `ARRAY[1, ${s}]`,
+    (s) => `1--1 OR ${s}`, // MySQL: 1 minus -1, then the subquery
+    (s) => `1 # ${s}`, // Postgres: an operator; MySQL: a comment
+    (s) => `/*! ${s} */`, // MySQL runs it
+    (s) => `/*M! ${s} */`, // MariaDB runs it
+    (s) => `('a\\', ${s}, 'b')`, // Postgres: three values; MySQL: one string
+    (s) => `CASE WHEN ${s} > 0 THEN 1 ELSE 0 END`,
+    (s) => `EXISTS ${s}`,
+    (s) => `x IN (1, ${s})`,
+    (s) => `${s} IS DISTINCT FROM 1`,
+    (s) => `1 IS DISTINCT FROM ${s}`,
+    (s) => `EXTRACT(YEAR FROM ${s})`,
+    (s) => `SUBSTRING(x FROM ${s})`,
+    (s) => `'a' || ${s}`,
+    (s) => `/* note */ ${s} -- note\n`,
+    (s) => `1 -- note\r${s}`, // Postgres ends the comment at \r
+    (s) => `E'\\'' || ${s}`,
+    (s) => `$$x$$ || ${s}`,
+    (s) => `count(*) OVER (ORDER BY ${s})`,
+    (s) => `count(*) FILTER (WHERE ${s} > 0)`,
+    (s) => `x = ANY(${s})`,
+    (s) => `NOT ${s}`,
+    (s) => `${s} BETWEEN 1 AND 2`,
+    (s) => `${s}::int`,
+    (s) => `IF(${s}, 1, 2)`,
+    (s) => `CASE ${s} WHEN 1 THEN 2 END`,
+    (s) => `(SELECT ${s})`,
+    (s) => `(SELECT 1 WHERE ${s} > 0)`,
+    (s) => `[f](${s})`,
+    (s) => `"s"."f"(${s})`,
+    (s) => `x[1][${s}]`,
+  );
+  const expressionIn = fc.constantFrom<(e: string) => string>(
+    (e) => `SELECT ${e} FROM leads`,
+    (e) => `SELECT * FROM leads WHERE id = ${e}`,
+    (e) => `SELECT * FROM leads l JOIN teams t ON t.id = ${e}`,
+    (e) => `SELECT * FROM leads GROUP BY a HAVING ${e} > 1 ORDER BY ${e}`,
+    (e) => `SELECT * FROM leads LIMIT ${e}`,
+    (e) => `UPDATE leads SET x = ${e} WHERE id = 1`,
+    (e) => `DELETE FROM leads WHERE x = ${e}`,
+    (e) => `INSERT INTO leads (a) VALUES (${e})`,
+    (e) => `INSERT INTO leads (a) VALUES (1) ON CONFLICT (a) DO UPDATE SET a = ${e}`,
+  );
+  const sourceOf = fc.constantFrom<(s: string) => string>(
+    (s) => `INSERT INTO leads ${s}`,
+    (s) => `INSERT INTO leads (a) ${s}`,
+    (s) => `INSERT INTO leads ${s.slice(1, -1)}`,
+  );
+  const hiding = fc.oneof(
+    fc.tuple(expressionIn, fc.array(wrapper, { maxLength: 3 }), secret).map(([at, wraps, s]) => at(wraps.reduce<string>((e, w) => w(e), s))),
+    fc.tuple(sourceOf, secret).map(([at, s]) => at(s)),
+  );
+
+  it("never names fewer tables than a query reads, however the subquery is hidden", () => {
+    fc.assert(
+      fc.property(hiding, (sql) => {
+        const tables = sqlTables(sql);
+        if (tables) expect(tables.read, sql).toContain("secrets");
+      }),
+      { numRuns: 3000 },
+    );
+  });
+
+  it("gives up on nesting of any depth instead of overflowing the stack", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 0, max: 20_000 }), fc.constantFrom("(", "(SELECT 1 FROM t WHERE x IN ", "lower(", "tags[("), (depth, open) => {
+        const close = open.endsWith("[(") ? ")]" : ")";
+        expect(() => sqlTables(`SELECT ${open.repeat(depth)}1${close.repeat(depth)} FROM leads`)).not.toThrow();
+      }),
+      { numRuns: 50 },
+    );
+  });
 });
 
 // --- The lock file ------------------------------------------------------------------
@@ -281,16 +377,62 @@ describe("project configuration", () => {
     return projectFiles(dir).find((e) => e.name === `<${path.basename(file)}>`);
   };
 
+  // Each generated piece of a workflow comes with what it grants, so the expected
+  // inventory is worked out from how the workflow was built, not by reading it back.
+  type Granting<T> = { yaml: T; grants: string[] };
+
   const trigger = fc.constantFrom("push", "pull_request", "pull_request_target", "release", "workflow_dispatch");
   const scope = fc.constantFrom("contents", "issues", "id-token", "pull-requests", "packages");
-  const permissions = fc.oneof(fc.constantFrom("read-all", "write-all"), fc.dictionary(scope, fc.constantFrom("read", "write", "none"), { minKeys: 1, maxKeys: 3 }));
+  // `{}` grants nothing; `permissions: null` (no value) is read as no block at all.
+  const permissions = fc.oneof(fc.constantFrom("read-all", "write-all", null), fc.dictionary(scope, fc.constantFrom("read", "write", "none"), { maxKeys: 3 }));
   // Full commit SHAs are pinned; tags, branches, and abbreviated SHAs aren't.
   const ref = fc.oneof(fc.stringMatching(/^[0-9a-f]{40}$/), fc.stringMatching(/^[0-9a-f]{7,39}$/), fc.constantFrom("v1", "v4.2.0", "main"));
-  const step = fc.oneof(
-    fc.tuple(fc.constantFrom("actions/checkout", "acme/deploy", "acme/tools/lint"), ref).map(([name, r]) => ({ uses: `${name}@${r}` })),
-    fc.stringMatching(/^[A-Z_][A-Z0-9_]{0,8}$/).map((s) => ({ run: "./deploy.sh", env: { TOKEN: `\${{ secrets.${s} }}` } })),
-  );
-  const job = fc.record({ "runs-on": fc.constant("ubuntu-latest"), permissions: fc.option(permissions, { nil: undefined }), steps: fc.array(step, { minLength: 1, maxLength: 4 }) });
+  const action: fc.Arbitrary<Granting<{ uses: string }>> = fc
+    .tuple(fc.constantFrom("actions/checkout", "acme/deploy", "acme/tools/lint"), ref)
+    .map(([name, r]) => ({ yaml: { uses: `${name}@${r}` }, grants: [`ci.action(${name})`, ...(/^[0-9a-f]{40}$/.test(r) ? [] : [`ci.unpinned(${name})`])] }));
+  // An image's name is everything but its tag and digest, its registry's port included; only a digest pins it.
+  const image = fc
+    .record({
+      registry: fc.option(fc.constantFrom("ghcr.io", "ghcr.io:443", "localhost:5000", "registry.example.com:8080"), { nil: undefined }),
+      path: fc.array(fc.stringMatching(/^[a-z0-9]{1,6}$/), { minLength: 1, maxLength: 3 }),
+      tag: fc.option(fc.constantFrom("latest", "1.0", "3.20-alpine"), { nil: undefined }),
+      digest: fc.option(fc.stringMatching(/^[0-9a-f]{64}$/), { nil: undefined }),
+    })
+    .map(({ registry, path: segments, tag, digest }) => {
+      const name = [registry, ...segments].filter(Boolean).join("/");
+      const ref = `${name}${tag ? `:${tag}` : ""}${digest ? `@sha256:${digest}` : ""}`;
+      return { ref, grants: [`ci.action(docker://${name})`, ...(digest ? [] : [`ci.unpinned(docker://${name})`])] };
+    });
+  // A secret, however an expression spells it: any case, any spacing, a property or an index.
+  const named = fc
+    .tuple(fc.constantFrom("secrets", "SECRETS", "Secrets"), fc.stringMatching(/^[A-Za-z_][A-Za-z0-9_]{0,8}$/), fc.constantFrom("", " ", "  "), fc.boolean(), fc.constantFrom("'", '"'))
+    .map(([context, name, space, dotted, quote]) => ({
+      expression: dotted ? `${context}${space}.${space}${name}` : `${context}${space}[${space}${quote}${name}${quote}${space}]`,
+      grants: [`ci.secret(${name.toUpperCase()})`],
+      mention: `${context}.${name}`,
+    }));
+  // ...and every secret at once, when the names aren't written out.
+  const whole = fc
+    .constantFrom("toJSON(secrets)", "secrets[matrix.name]", "join(secrets.*, ',')", "secrets", "fromJSON(toJSON(SECRETS)).x", "secrets[format('{0}_KEY', 'AWS')]")
+    .map((expression) => ({ expression, grants: ["ci.secret(all)"], mention: expression }));
+  const secretStep: fc.Arbitrary<Granting<object>> = fc
+    .tuple(fc.oneof(named, whole), fc.constantFrom("env", "if", "text", "string"))
+    .map(([s, where]) =>
+      where === "env"
+        ? { yaml: { run: "./deploy.sh", env: { TOKEN: `\${{ ${s.expression} }}` } }, grants: s.grants }
+        : where === "if"
+          ? { yaml: { if: `${s.expression} != ''`, run: "./deploy.sh" }, grants: s.grants }
+          : // Mentioned outside an expression, or inside a string in one: not read.
+            { yaml: { name: `uses ${s.mention}`, run: where === "text" ? `echo ${s.mention}` : `echo \${{ '${s.mention.replaceAll("'", "''")}' }}` }, grants: [] },
+    );
+  const dockerStep = image.map((i) => ({ yaml: { uses: `docker://${i.ref}` }, grants: i.grants }));
+  const step = fc.oneof(action, secretStep, dockerStep);
+  const job = fc.record({
+    "runs-on": fc.constant("ubuntu-latest"),
+    permissions: fc.option(permissions, { nil: undefined }),
+    container: fc.option(image, { nil: undefined }),
+    steps: fc.array(step, { minLength: 1, maxLength: 4 }),
+  });
   const workflow = fc.record({
     on: fc.oneof(
       trigger,
@@ -302,46 +444,80 @@ describe("project configuration", () => {
   });
   type Workflow = typeof workflow extends fc.Arbitrary<infer W> ? W : never;
 
-  /** What GitHub grants for a workflow, worked out from the object it was written from. */
+  /** The workflow as it's written. */
+  const asYaml = (w: Workflow) => ({
+    ...w,
+    jobs: Object.fromEntries(
+      Object.entries(w.jobs).map(([id, { container, steps, ...job }]) => [id, { ...job, ...(container ? { container: container.ref } : {}), steps: steps.map((s) => s.yaml) }]),
+    ),
+  });
+
+  /** What GitHub grants for a workflow, worked out from how it was built. */
   function grants(w: Workflow): Set<string> {
     const out = new Set<string>();
     for (const t of typeof w.on === "string" ? [w.on] : Array.isArray(w.on) ? w.on : Object.keys(w.on)) out.add(`ci.trigger(${t})`);
     for (const job of Object.values(w.jobs)) {
-      const p = job.permissions ?? w.permissions;
-      if (p === undefined) out.add("ci.permission(default)");
+      const p = job.permissions !== undefined ? job.permissions : w.permissions;
+      if (p === undefined || p === null) out.add("ci.permission(default)");
       else if (typeof p === "string") out.add(`ci.permission(${p})`);
       else for (const [s, level] of Object.entries(p)) out.add(`ci.permission(${s}: ${level})`);
-      for (const s of job.steps) {
-        if ("uses" in s) {
-          const [name, r] = s.uses.split("@") as [string, string];
-          out.add(`ci.action(${name})`);
-          if (!/^[0-9a-f]{40}$/.test(r)) out.add(`ci.unpinned(${name})`);
-        } else {
-          out.add(`ci.secret(${/secrets\.(\w+)/.exec(s.env.TOKEN)![1]})`);
-        }
-      }
+      for (const g of [...(job.container?.grants ?? []), ...job.steps.flatMap((s) => s.grants)]) out.add(g);
     }
     return out;
   }
 
-  it("records every trigger, token permission, Action, and secret a workflow has, and nothing else", () => {
+  /** The same YAML with repeated values, keys, and blocks written as aliases of their first occurrence. */
+  function withAliases(value: unknown, choices: boolean[]): string {
+    const doc = new Document(value);
+    const first = new Map<string, YamlNode>();
+    let n = 0;
+    visit(doc, {
+      Node(_, node) {
+        if (isAlias(node)) return;
+        const shape = JSON.stringify(node.toJSON());
+        const earlier = first.get(shape);
+        if (!earlier) first.set(shape, node);
+        else if (choices[n++ % choices.length]) return doc.createAlias(earlier as Scalar);
+      },
+    });
+    return doc.toString();
+  }
+
+  it("records every trigger, token permission, Action, image, and secret a workflow has, and nothing else", () => {
     fc.assert(
       fc.property(workflow, (w) => {
-        expect(new Set(inventory(".github/workflows/ci.yml", stringify(w))?.actual)).toEqual(grants(w));
+        expect(new Set(inventory(".github/workflows/ci.yml", stringify(asYaml(w)))?.actual)).toEqual(grants(w));
       }),
-      { numRuns: 60 },
+      { numRuns: 100 },
     );
   });
 
-  it("never skips a workflow it can't read: it's recorded as unverifiable", () => {
-    const text = fc.oneof(hostile, fc.string({ unit: fc.constantFrom("on:", "jobs:", "uses: x@v1", "\n", "  ", "- ", "{", "[", ":", "&a ", "*a", "'", '"') }));
+  it("reads a workflow the same when it's written with anchors and aliases", () => {
+    fc.assert(
+      fc.property(workflow, fc.array(fc.boolean(), { minLength: 1, maxLength: 20 }), (w, choices) => {
+        const aliased = withAliases(asYaml(w), choices);
+        expect(new Set(inventory(".github/workflows/ci.yml", aliased)?.actual), aliased).toEqual(grants(w));
+      }),
+      { numRuns: 100 },
+    );
+  });
+
+  it("never skips a workflow it can't read: it's recorded as unverifiable, with the file's hash", () => {
+    const text = fc.oneof(hostile, fc.string({ unit: fc.constantFrom("on:", "jobs:", "uses: x@v1", "\n", "  ", "- ", "{", "[", ":", "&a ", "*a", "*b", "'", '"', "\uFEFF") }));
     fc.assert(
       fc.property(text, (t) => {
         const entry = inventory(".github/workflows/ci.yml", t);
-        const doc = parseDocument(t, { uniqueKeys: false });
-        if (doc.errors.length > 0 || !isMap(doc.contents)) expect(entry?.actual).toEqual(["ci.unverifiable"]);
+        // As written to disk, where a lone surrogate becomes U+FFFD.
+        const written = readFileSync(path.join(dir, ".github", "workflows", "ci.yml"), "utf8").replace(/^\uFEFF/, "");
+        const unverifiable = `ci.unverifiable(sha256:${createHash("sha256").update(written.replaceAll("\r\n", "\n")).digest("hex")})`;
+        const doc = parseDocument(written, { uniqueKeys: false, schema: "core" });
+        if (doc.errors.length > 0 || !isMap(doc.contents)) expect(entry?.actual).toEqual([unverifiable]);
+        // An alias with no anchor before it can't be followed: whatever it stands for is unknown.
+        let unresolved = false;
+        visit(doc, { Alias: (_, alias) => void (unresolved ||= alias.resolve(doc) === undefined) });
+        if (unresolved) expect(entry?.actual).toContain(unverifiable);
       }),
-      { numRuns: 60 },
+      { numRuns: 100 },
     );
   });
 

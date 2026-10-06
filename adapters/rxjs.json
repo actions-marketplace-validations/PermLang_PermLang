@@ -1,0 +1,18 @@
+{
+  "permlang": 1,
+  "package": "rxjs",
+  "default": [],
+  "functions": {
+    "ajax": ["net({host:0})"],
+    "AjaxCreationMethod()": ["net({host:0})"],
+    "AjaxCreationMethod.get": ["net({host:0})"],
+    "AjaxCreationMethod.post": ["net({host:0})"],
+    "AjaxCreationMethod.put": ["net({host:0})"],
+    "AjaxCreationMethod.patch": ["net({host:0})"],
+    "AjaxCreationMethod.delete": ["net({host:0})"],
+    "AjaxCreationMethod.getJSON": ["net({host:0})"],
+    "fromFetch": ["net({host:0})"],
+    "webSocket": ["net({host:0})"],
+    "WebSocketSubject.constructor": ["net({host:0})"]
+  }
+}

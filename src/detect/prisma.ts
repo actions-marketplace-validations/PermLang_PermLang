@@ -1,14 +1,25 @@
 // Prisma, the first database client with built-in support (design doc open
 // question 2). Prisma generates one `<Model>Delegate` interface per model; the
 // table in db.read/db.write is the model's accessor name, e.g. `prisma.lead`.
+// Related tables reached through `include`, `where`, nested writes, and the fluent
+// API (`prisma.user.findUnique(...).posts()`) are read from the arguments
+// (prisma-args.ts).
 //
 // A client built with `$extends(...)` (read replicas, soft deletes, logging) types
 // every model through generic runtime types instead, so the declaration doesn't
-// name the model. Then the model is taken from the call site: `client.user.findMany`.
+// name the model. Then the model comes from those types, or from the call site:
+// `client.user.findMany`.
+//
+// Prisma is recognized by its own files, never by a name in a path: a project in a
+// folder called prisma-shop isn't Prisma. Its files are the @prisma/client package,
+// the client it generates into node_modules/.prisma/client, and a client generated
+// into a custom `output` folder, which Prisma marks (isGeneratedClient).
 
-import { Node } from "ts-morph";
+import { Node, type ImportDeclaration, type SourceFile, type Type } from "ts-morph";
+import { packageOf } from "../adapters.js";
 import type { Capability } from "../capability.js";
-import { containerName, unwrapExpression, type CallLike } from "./shared.js";
+import { accessor, argumentAccess, modelNamed, relationAccess, scoped, type Model } from "./prisma-args.js";
+import { argumentsOf, containerName, unwrapExpression, type CallLike } from "./shared.js";
 
 const READS = new Set([
   "findUnique", "findUniqueOrThrow", "findFirst", "findFirstOrThrow", "findMany",
@@ -25,26 +36,91 @@ const raw: Capability[] = [{ name: "db.read", dynamic: true }, { name: "db.write
 
 /** `declaration` is the resolved signature of `call` (absent when the function is used as a value). */
 export function prismaCapabilities(declaration: Node | undefined, call?: CallLike): Capability[] {
-  if (!declaration || !/prisma/i.test(declaration.getSourceFile().getFilePath())) return [];
+  if (!declaration || !isPrismaClient(declaration)) return [];
   const method = memberName(declaration) ?? calledName(call);
   if (!method) return [];
-  const container = containerName(declaration);
+  const container = containerName(declaration) ?? "";
+  const args = call ? argumentsOf(call)[0] : undefined;
+  const near = declaration.getSourceFile();
 
-  const model = /^(\w+)Delegate$/.exec(container ?? "")?.[1];
-  if (model) return forModel(method, model[0]!.toLowerCase() + model.slice(1));
+  const delegate = /^(\w+)Delegate$/.exec(container)?.[1];
+  if (delegate) return forModel(method, modelNamed(delegate, near), args);
   if (RAW.test(method)) return raw;
+  const fluent = /^Prisma__(\w+)Client$/.exec(container)?.[1];
+  if (fluent) return relationAccess(method, args, modelNamed(fluent, near), declaration) ?? [];
 
-  // An extended client: only the call site names the model.
-  if (!READS.has(method) && !WRITES.has(method)) return [];
-  return forModel(method, modelAtCallSite(call));
+  // An extended client: the runtime types, or the call site, name the model.
+  const receiver = receiverOf(call);
+  const typed = receiver && runtimeModel(receiver.getType(), receiver);
+  if (typed?.fluent) return relationAccess(method, args, typed.model, receiver!) ?? [];
+  if (typed) return forModel(method, typed.model, args);
+  if (READS.has(method) || WRITES.has(method)) return forModel(method, { table: modelAtCallSite(receiver), payload: undefined }, args);
+  return [];
 }
 
-function forModel(method: string, table: string | undefined): Capability[] {
-  const cap = (name: string): Capability => (table === undefined ? { name, dynamic: true } : { name, arg: table });
-  if (READS.has(method)) return [cap("db.read")];
-  if (WRITES.has(method)) return [cap("db.write")];
-  // Anything else on a delegate (findRaw, aggregateRaw, ...) may do either.
-  return [cap("db.read"), cap("db.write")];
+function forModel(method: string, model: Model, args: Node | undefined): Capability[] {
+  if (READS.has(method)) return [scoped("db.read", model.table), ...argumentAccess(args, model, "read")];
+  if (WRITES.has(method)) return [scoped("db.write", model.table), ...argumentAccess(args, model, "write")];
+  // Anything else on a model (findRaw, aggregateRaw, ...) may do either.
+  return [scoped("db.read", model.table), scoped("db.write", model.table)];
+}
+
+/** Whether a declaration belongs to a Prisma client. Prisma's API is all types, so code with a body never does. */
+function isPrismaClient(declaration: Node): boolean {
+  if (Node.isArrowFunction(declaration) || Node.isFunctionExpression(declaration)) return false;
+  if (Node.isBodyable(declaration) && declaration.hasBody()) return false;
+  const pkg = packageOf(declaration);
+  return pkg === "@prisma/client" || pkg === ".prisma" || isGeneratedClient(declaration.getSourceFile());
+}
+
+// A client generated into a custom `output` folder sits among the project's own
+// files, so it is recognized by what Prisma writes: the prisma-client generator
+// starts every file with this header, and prisma-client-js imports its runtime as
+// `runtime`, from @prisma/client or from the copy it puts next to the client. That
+// copy is Prisma's too: `$extends` clients are typed by it.
+const GENERATED_HEADER = "/* !!! This is code generated by Prisma. Do not edit directly. !!! */";
+const RUNTIME_IMPORT = /^(@prisma\/client|\.)\/runtime\//;
+const generated = new WeakMap<SourceFile, boolean>();
+
+function isGeneratedClient(sourceFile: SourceFile): boolean {
+  let known = generated.get(sourceFile);
+  if (known === undefined) {
+    known =
+      isGeneratedFile(sourceFile) ||
+      sourceFile.getReferencingSourceFiles().some((client) => runtimeImports(client).some((i) => i.getModuleSpecifierSourceFile() === sourceFile));
+    generated.set(sourceFile, known);
+  }
+  return known;
+}
+
+function isGeneratedFile(sourceFile: SourceFile): boolean {
+  return sourceFile.getFullText().trimStart().startsWith(GENERATED_HEADER) || runtimeImports(sourceFile).length > 0;
+}
+
+/** A source file's imports of Prisma's runtime as `runtime`. */
+function runtimeImports(sourceFile: SourceFile): ImportDeclaration[] {
+  return sourceFile.getImportDeclarations().filter((i) => i.getNamespaceImport()?.getText() === "runtime" && RUNTIME_IMPORT.test(i.getModuleSpecifierValue()));
+}
+
+/**
+ * The model a runtime type stands for, as `$extends` clients type their models:
+ * `DynamicModelExtensionThis<TypeMap, "User", ...>`, or the fluent API's
+ * `DynamicModelExtensionFluentApi<TypeMap, "User", ...>`. The type map holds the
+ * model's payload, which lists its relations.
+ */
+function runtimeModel(type: Type, at: Node): { model: Model; fluent: boolean } | undefined {
+  for (const t of [type, ...(type.isIntersection() ? type.getIntersectionTypes() : [])]) {
+    const alias = t.getAliasSymbol()?.getName();
+    if (alias !== "DynamicModelExtensionThis" && alias !== "DynamicModelExtensionFluentApi") continue;
+    const [typeMap, model] = t.getAliasTypeArguments() as [Type, Type];
+    // After a list relation, the fluent API names no model.
+    if (!model.isStringLiteral()) continue;
+    const name = String(model.getLiteralValue());
+    const member = (of: Type | undefined, key: string) => of?.getProperty(key)?.getTypeAtLocation(at);
+    const payload = member(member(member(typeMap, "model"), name), "payload");
+    return { model: { table: accessor(name), payload }, fluent: alias === "DynamicModelExtensionFluentApi" };
+  }
+  return undefined;
 }
 
 function memberName(d: Node): string | undefined {
@@ -59,11 +135,14 @@ function calledName(call: CallLike | undefined): string | undefined {
   return Node.isPropertyAccessExpression(callee) ? callee.getName() : undefined;
 }
 
-/** `user` in `client.user.findMany(...)`; undefined when the model is reached another way. */
-function modelAtCallSite(call: CallLike | undefined): string | undefined {
+/** `client.user` in `client.user.findMany(...)`. */
+function receiverOf(call: CallLike | undefined): Node | undefined {
   if (!call || Node.isTaggedTemplateExpression(call)) return undefined;
   const callee = unwrapExpression(call.getExpression());
-  if (!Node.isPropertyAccessExpression(callee)) return undefined;
-  const object = unwrapExpression(callee.getExpression());
-  return Node.isPropertyAccessExpression(object) ? object.getName() : undefined;
+  return Node.isPropertyAccessExpression(callee) ? unwrapExpression(callee.getExpression()) : undefined;
+}
+
+/** `user` in `client.user.findMany(...)`; undefined when the model is reached another way. */
+function modelAtCallSite(receiver: Node | undefined): string | undefined {
+  return receiver && Node.isPropertyAccessExpression(receiver) ? receiver.getName() : undefined;
 }

@@ -1,0 +1,24 @@
+{
+  "permlang": 1,
+  "package": "tar",
+  "default": ["fs.read"],
+  "functions": {
+    "TarCommand()": ["fs.read", "fs.write"],
+    "create": ["fs.read", "fs.write"],
+    "c": ["fs.read", "fs.write"],
+    "extract": ["fs.read", "fs.write"],
+    "x": ["fs.read", "fs.write"],
+    "replace": ["fs.read", "fs.write"],
+    "r": ["fs.read", "fs.write"],
+    "update": ["fs.read", "fs.write"],
+    "u": ["fs.read", "fs.write"],
+    "list": ["fs.read"],
+    "t": ["fs.read"],
+    "Unpack.constructor": ["fs.write"],
+    "UnpackSync.constructor": ["fs.write"],
+    "Pack.constructor": ["fs.read"],
+    "PackSync.constructor": ["fs.read"],
+    "WriteEntry.constructor": ["fs.read"],
+    "WriteEntrySync.constructor": ["fs.read"]
+  }
+}

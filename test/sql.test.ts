@@ -5,6 +5,7 @@
 // needs bare db.read and db.write. A wrong "safe" answer is a silent pass.
 
 import { describe, expect, it } from "vitest";
+import { isStatement } from "../src/detect/drizzle.js";
 import { sqlTables } from "../src/detect/sql-tables.js";
 
 describe("sqlTables: understood statements", () => {
@@ -49,6 +50,15 @@ describe("sqlTables: understood statements", () => {
     ["INSERT INTO a AS t (id) VALUES (1)", { read: [], write: ["a"] }],
     ["DELETE FROM ONLY a WHERE x = 1", { read: [], write: ["a"] }],
     ["-- nothing but a comment", { read: [], write: [] }],
+    // Found in the third review: shapes whose tables were read only in part.
+    ["SELECT * FROM leads WHERE tags[(SELECT max(id) FROM secrets)] = 1", { read: ["leads", "secrets"], write: [] }],
+    ["SELECT tags[1], tags[1:2], ARRAY[1, 2] FROM leads", { read: ["leads"], write: [] }],
+    ["INSERT INTO leads (id) (SELECT id FROM secrets)", { read: ["secrets"], write: ["leads"] }],
+    ["SELECT a --\nFROM leads", { read: ["leads"], write: [] }],
+    ["SELECT a --\tcomment\nFROM leads --", { read: ["leads"], write: [] }],
+    ["SELECT a -- Windows line ends\r\nFROM leads", { read: ["leads"], write: [] }],
+    ["SELECT * FROM leads WHERE x = ANY('{1,2}'::int[])", { read: ["leads"], write: [] }],
+    ['SELECT * FROM [order details] JOIN b USING (id, "k")', { read: ["order details", "b"], write: [] }],
   ])("%s", (sql, expected) => {
     expect(sqlTables(sql)).toEqual(expected);
   });
@@ -112,7 +122,71 @@ describe("sqlTables: anything else is unknown", () => {
     // A placeholder where a table name goes (postgres.js `${sql(t)}`).
     "SELECT * FROM $1",
     "DELETE FROM ?",
+    // Found in the third review: each of these was read as touching fewer tables than it does.
+    "INSERT INTO leads (SELECT * FROM secrets)",
+    "INSERT INTO leads ((id))",
+    "SELECT \"dblink_exec\"('h', 'DELETE FROM users')",
+    "SELECT \"lower\"(name) FROM leads",
+    "SELECT evil.lower(id) FROM leads",
+    "SELECT pg_catalog.count(*) FROM leads",
+    // MySQL needs a space after --, so this runs the subquery there.
+    "SELECT * FROM leads WHERE 1--1 OR (SELECT max(id) FROM secrets) > 0",
+    "SELECT 1 --x\nFROM secrets",
+    "SELECT 1 -- x\nFROM secrets",
+    // MySQL reads double quotes as a string with backslash escapes: this reads leads there.
+    "SELECT \"a\\\" FROM secrets -- \" FROM leads",
+    // MariaDB runs /*M! ... */ as SQL.
+    "SELECT * FROM a /*M! , secrets */",
+    // Names that read differently from how they're written, or can't be declared.
+    "SELECT * FROM U&\"\\0073ecrets\"",
+    "SELECT * FROM \"audit.log\"",
+    "SELECT * FROM \"\"",
+    "SELECT * FROM \"leads \"",
+    "SELECT * FROM \"x), net(evil\"",
+    "SELECT * FROM [x, secrets]",
+    // Column lists that aren't lists of names.
+    "SELECT * FROM a x((SELECT 1 FROM secrets))",
+    "SELECT * FROM a JOIN b USING ((SELECT 1 FROM secrets))",
+    "SELECT * FROM a JOIN b USING (select)",
+    // Postgres ends a comment at a lone \r.
+    "SELECT a -- note\rFROM secrets",
+    // Postgres's U&"..." is the table secrets, not U.
+    'DELETE FROM U&"secrets"',
+    'INSERT INTO U&"secrets" VALUES (1)',
   ])("unknown: %j", (sql) => {
     expect(sqlTables(sql)).toBeUndefined();
+  });
+
+  it("gives up on deeply nested SQL instead of overflowing the stack", () => {
+    for (const depth of [100, 10_000]) {
+      expect(sqlTables(`SELECT ${"(".repeat(depth)}1${")".repeat(depth)} FROM leads`)).toBeUndefined();
+      expect(sqlTables(`SELECT * FROM leads WHERE id IN ${"(SELECT id FROM leads WHERE id IN ".repeat(depth)}(1)${")".repeat(depth)}`)).toBeUndefined();
+    }
+  });
+});
+
+describe("Drizzle fragments: a whole statement, or an expression", () => {
+  it.each([
+    ["SELECT 1", true],
+    ["  with x as (select 1) select * from x", true],
+    ["-- note\nDELETE FROM a", true],
+    ["/* a */ /* b */\n-- c\nINSERT INTO a VALUES (1)", true],
+    ["/**/UPDATE a SET b = 1", true],
+    ["lower(name)", false],
+    ["-- only a comment", false],
+    ["/* never closed SELECT", false],
+    ["/*/ SELECT */ x", false],
+    ["selection", false],
+  ])("%j is a statement: %s", (text, expected) => {
+    expect(isStatement(text)).toBe(expected);
+  });
+
+  // Code scanning found the old regular expression could backtrack exponentially on this shape,
+  // and PermLang reads code from pull requests: it must stay linear.
+  it("reads a fragment built to make a regular expression backtrack, quickly", () => {
+    const start = performance.now();
+    expect(isStatement(`/*${"*//*".repeat(100_000)}`)).toBe(false);
+    expect(isStatement(`${"-- x\n".repeat(100_000)}SELECT 1`)).toBe(true);
+    expect(performance.now() - start).toBeLessThan(1000);
   });
 });

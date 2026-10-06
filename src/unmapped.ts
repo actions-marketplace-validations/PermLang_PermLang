@@ -107,7 +107,7 @@ function bareName(specifier: string): string {
 }
 
 /** Every place a file names a module: import and export declarations, `import x = require("x")`, and `import("x")`. */
-function moduleReferences(sourceFile: SourceFile): { specifierNode: StringLiteral | NoSubstitutionTemplateLiteral; node: Node }[] {
+export function moduleReferences(sourceFile: SourceFile): { specifierNode: StringLiteral | NoSubstitutionTemplateLiteral; node: Node }[] {
   const references: { specifierNode: StringLiteral | NoSubstitutionTemplateLiteral; node: Node }[] = [];
   for (const decl of [...sourceFile.getImportDeclarations(), ...sourceFile.getExportDeclarations()]) {
     const specifierNode = decl.getModuleSpecifier();

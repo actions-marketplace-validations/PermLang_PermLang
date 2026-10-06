@@ -172,16 +172,40 @@
       "exec",
       "fs.write"
     ],
+    "src/package-files.ts#folders": [
+      "fs.read"
+    ],
+    "src/package-files.ts#workspaceFolders": [
+      "fs.read"
+    ],
+    "src/project-files.ts#Entry.constructor": [
+      "fs.read"
+    ],
+    "src/project-files.ts#Project.follow": [
+      "fs.read"
+    ],
+    "src/project-files.ts#Project.manifests": [
+      "fs.read"
+    ],
+    "src/project-files.ts#Project.open": [
+      "fs.read"
+    ],
+    "src/project-files.ts#Project.packages": [
+      "fs.read"
+    ],
+    "src/project-files.ts#Project.yaml": [
+      "fs.read"
+    ],
+    "src/project-files.ts#linkTarget": [
+      "fs.read"
+    ],
     "src/project-files.ts#listFiles": [
       "fs.read"
     ],
-    "src/project-files.ts#packageEntry": [
+    "src/project-files.ts#localFiles": [
       "fs.read"
     ],
     "src/project-files.ts#projectFiles": [
-      "fs.read"
-    ],
-    "src/project-files.ts#yamlEntry": [
       "fs.read"
     ],
     "src/spec/parse.ts#parseSpecs": [

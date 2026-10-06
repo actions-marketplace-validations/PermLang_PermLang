@@ -4,8 +4,18 @@ declare module "drizzle-orm/pg-core" {
   export interface PgTable {
     readonly _: { name: string };
   }
-  export const pgTable: (name: string, columns: Record<string, unknown>) => PgTable;
-  export function text(name?: string): unknown;
+  export const pgTable: (name: string, columns: Record<string, unknown>, extra?: (t: Record<string, unknown>) => unknown[]) => PgTable;
+  export function text(name?: string): PgColumnBuilder;
+  // Schema definitions that take SQL: defaults, generated columns, checks, partial indexes.
+  export class PgColumnBuilder {
+    default(value: unknown): this;
+    generatedAlwaysAs(as: unknown): this;
+  }
+  export class IndexBuilder {
+    where(condition: unknown): this;
+  }
+  export function index(name: string): { on(...columns: unknown[]): IndexBuilder };
+  export function check(name: string, value: unknown): unknown;
   export class PgSchema {
     table(name: string, columns: Record<string, unknown>): PgTable;
   }
@@ -19,6 +29,7 @@ declare module "drizzle-orm/pg-core" {
     leftJoin: PgSelectJoinFn;
     innerJoin: PgSelectJoinFn;
     where(condition: unknown): PgSelect;
+    orderBy(...columns: unknown[]): PgSelect;
     then<R>(onfulfilled: (value: unknown[]) => R): Promise<R>;
   }
   export class PgSelectBuilder {
@@ -36,7 +47,7 @@ declare module "drizzle-orm/pg-core" {
   }
   export class PgDatabase {
     query: Record<string, RelationalQueryBuilder>;
-    select(): PgSelectBuilder;
+    select(fields?: Record<string, unknown>): PgSelectBuilder;
     insert(table: PgTable): PgInsertBuilder;
     update(table: PgTable): PgUpdateBuilder;
     delete(table: PgTable): { where(condition: unknown): Promise<unknown> };
@@ -56,5 +67,12 @@ declare module "drizzle-orm/node-postgres/migrator" {
 
 declare module "drizzle-orm" {
   export function eq(left: unknown, right: unknown): unknown;
-  export function sql(strings: TemplateStringsArray, ...values: unknown[]): unknown;
+  export class SQL {
+    as(alias: string): this;
+  }
+  export function sql(strings: TemplateStringsArray, ...values: unknown[]): SQL;
+  export namespace sql {
+    function raw(str: string): SQL;
+    function identifier(value: string): SQL;
+  }
 }

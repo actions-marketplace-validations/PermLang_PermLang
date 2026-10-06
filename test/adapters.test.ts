@@ -36,6 +36,7 @@ describe("adapter manifests", () => {
     [{ ...valid, functions: { sendSms: ["(x)"] } }, /is not a capability/],
     [{ ...valid, functions: { sendSms: ["sms.send!"] } }, /malformed capability/],
     [{ ...valid, functions: { sendSms: ["sms.send({arg:0+})"] } }, /only \{host:N\+\} can be overridden/],
+    [{ ...valid, functions: { sendSms: ["sms.send({arg:0?})"] } }, /only \{host:N\?\} can be left out/],
     [{ ...valid, default: "net" }, /"default" must be an array/],
   ])("rejects %j", (raw, reason) => {
     const { errors } = parseManifest(raw, "bad.json");
