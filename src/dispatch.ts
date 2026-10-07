@@ -13,8 +13,20 @@
 // A member is a method, an accessor, or a property (`send: (u) => void`, `readonly url: string`),
 // reached by calling it, reading it, or passing it on (`urls.map(s.send)`).
 // Functions attached after the fact (`obj.m = fn`) are not found: a known limit.
+//
+// A call through a function type can run more than one function too, when the type is a
+// callable interface or type alias (`interface Runner { (cmd: string): void }`,
+// `type Runner = (cmd: string) => void`), or the type of a collection's entries
+// (`Map<string, (cmd: string) => void>`, `Handler[]`, or one TypeScript inferred from a
+// function in it: `new Map([["run", (cmd: string) => ...]])`). It's charged with every
+// function written against that type: one whose contextual type it is (`const r: Runner =
+// (cmd) => ...`, an entry of the collection, `ops.set("x", (cmd) => ...)`), or a named
+// function put where it's expected (`ops.set("x", run)`). A function that merely fits isn't
+// counted, unlike a class that fits an interface: nearly every function fits a call signature.
+// A function type written for a parameter isn't one of these: a callback runs as part of the
+// code that passes it, which is charged with it already.
 
-import { Node, SyntaxKind, ts, type ClassDeclaration, type ClassExpression, type ObjectLiteralExpression, type SourceFile, type Type } from "ts-morph";
+import { Node, SyntaxKind, ts, type ClassDeclaration, type ClassExpression, type Expression, type Identifier, type ObjectLiteralExpression, type SourceFile, type Type } from "ts-morph";
 import { resolveAlias } from "./detect/shared.js";
 import { isInNodeModules, unitNodeForDeclaration, unitNodeForSymbol } from "./units.js";
 import { descendantsOfKind } from "./walk.js";
@@ -28,8 +40,10 @@ export class Hierarchy {
   /** Classes and object literals by the names of the members they implement with code. */
   private readonly byMember = new Map<string, Implementer[]>();
   private readonly cache = new Map<Node, Node[]>();
+  /** Functions written against each function type that's dispatched, found when a call first needs them. */
+  private written: Map<Node, Node[]> | undefined;
 
-  constructor(sourceFiles: readonly SourceFile[]) {
+  constructor(private readonly sourceFiles: readonly SourceFile[]) {
     for (const sf of sourceFiles) {
       for (const cls of [...descendantsOfKind(sf, SyntaxKind.ClassDeclaration), ...descendantsOfKind(sf, SyntaxKind.ClassExpression)]) {
         this.classes.push({ cls, ancestors: classAncestors(cls) });
@@ -84,6 +98,125 @@ export class Hierarchy {
     out.delete(member);
     return [...out];
   }
+
+  /**
+   * The functions a call whose signature `declaration` declares might run, beyond the
+   * declaration itself: for a dispatched function type (see above), the functions written
+   * against it, and an anonymous function the type was inferred from. Each is a unit node,
+   * or an anonymous function, which stands for the part of its unit inside it (check.ts).
+   */
+  functionsCalledThrough(declaration: Node): Node[] {
+    if (!isDispatchedSignature(declaration)) return [];
+    const cached = this.cache.get(declaration);
+    if (cached) return cached;
+    const own = Node.isArrowFunction(declaration) || Node.isFunctionExpression(declaration) ? [declaration] : [];
+    const out = [...new Set([...own, ...(this.writtenAgainst().get(declaration) ?? [])])];
+    this.cache.set(declaration, out);
+    return out;
+  }
+
+  private writtenAgainst(): Map<Node, Node[]> {
+    if (this.written) return this.written;
+    const written = new Map<Node, Node[]>();
+    const add = (expression: Expression, fn: Node) => {
+      for (const signature of contextualSignatures(expression)) if (isDispatchedSignature(signature)) push(written, signature, fn);
+    };
+    for (const sf of this.sourceFiles) {
+      for (const fn of [...descendantsOfKind(sf, SyntaxKind.ArrowFunction), ...descendantsOfKind(sf, SyntaxKind.FunctionExpression)]) {
+        add(fn, unitNodeForDeclaration(fn) ?? fn);
+      }
+      for (const id of descendantsOfKind(sf, SyntaxKind.Identifier)) {
+        const reference = functionPassed(id);
+        if (reference) add(reference.expression, reference.unit);
+      }
+    }
+    return (this.written = written);
+  }
+}
+
+/**
+ * Whether a call through this signature declaration is dispatched: a call signature or
+ * function type of the project's that's a callable interface or type alias, or the type of a
+ * collection's entries; or an anonymous function of the project's that the callee's type was
+ * inferred from (`new Map([["run", (cmd: string) => ...]])`, or one a function returns). Not a
+ * function held by a name, which a call by that name runs alone.
+ */
+function isDispatchedSignature(declaration: Node): boolean {
+  if (!isFirstParty(declaration)) return false;
+  if (Node.isArrowFunction(declaration) || Node.isFunctionExpression(declaration)) return unitNodeForDeclaration(declaration) === undefined;
+  if (!Node.isCallSignatureDeclaration(declaration) && !Node.isFunctionTypeNode(declaration)) return false;
+  // What the type is written for, past parentheses, unions, and (for a call signature) its object type.
+  let owner = declaration.getParentOrThrow();
+  while (Node.isParenthesizedTypeNode(owner) || Node.isUnionTypeNode(owner) || Node.isIntersectionTypeNode(owner) || Node.isTypeLiteral(owner)) owner = owner.getParentOrThrow();
+  if (Node.isInterfaceDeclaration(owner) || Node.isTypeAliasDeclaration(owner)) return true;
+  // A collection's entries, unless the collection is a parameter's: like a callback, what's in
+  // it runs as part of the code that passes it, which is charged with it already.
+  return COLLECTIONS.has(owner.getKind()) && !Node.isParameterDeclaration(annotated(declaration));
+}
+
+// Where a function type is a collection's entries: a type argument (`Map<string, F>`,
+// `new Map<string, F>()`), an array or tuple, or an index signature. A variable's, property's,
+// or return type of its own is left out: one function, held by a name.
+const COLLECTIONS = new Set([
+  SyntaxKind.TypeReference, SyntaxKind.ExpressionWithTypeArguments, SyntaxKind.NewExpression, SyntaxKind.CallExpression,
+  SyntaxKind.ArrayType, SyntaxKind.TupleType, SyntaxKind.NamedTupleMember, SyntaxKind.RestType, SyntaxKind.OptionalType, SyntaxKind.IndexSignature,
+]);
+
+/** What a type is written for: the parameter, variable, or other declaration whose type it's part of. */
+function annotated(type: Node): Node {
+  let node = type.getParentOrThrow();
+  while (Node.isTypeNode(node) || Node.isPropertySignature(node) || Node.isIndexSignatureDeclaration(node) || Node.isMethodSignature(node)) node = node.getParentOrThrow();
+  return node;
+}
+
+/**
+ * The declarations of the call signatures of an expression's contextual type: what it's
+ * written against. These are found for the whole project when one call needs them, so an
+ * expression TypeScript fails on (nested too deeply, say) is left out, as a call it fails to
+ * resolve is (shared.ts), rather than failing the file whose call needed them.
+ */
+function contextualSignatures(expression: Expression): Node[] {
+  try {
+    const type = expression.getContextualType()?.getNonNullableType();
+    if (!type) return [];
+    const parts = type.isUnion() ? type.getUnionTypes() : [type];
+    return parts.flatMap((t) => t.getCallSignatures().map((s) => s.getDeclaration()));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A function of the project's named, not called, where its contextual type decides what it
+ * is: an argument (`ops.set("x", run)`), an entry (`[run]`), a value (`{ go: run }`,
+ * `const r: Runner = run`, `r = run`, `return run`), or what's cast (`run as Runner`).
+ */
+function functionPassed(id: Identifier): { expression: Expression; unit: Node } | undefined {
+  const parent = id.getParentOrThrow();
+  // `api.run` stands for the whole access; `api` in it is an object, not a function passed.
+  if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === id) return undefined;
+  const expression = Node.isPropertyAccessExpression(parent) ? parent : id;
+  if (!isContextuallyTyped(expression)) return undefined;
+  const symbol = id.getSymbol();
+  const unit = symbol && unitNodeForSymbol(resolveAlias(symbol));
+  if (!unit || !isFunctionUnit(unit)) return undefined;
+  return { expression, unit };
+}
+
+function isContextuallyTyped(expression: Node): boolean {
+  const outer = expression.getParentOrThrow();
+  if (Node.isCallExpression(outer) || Node.isNewExpression(outer)) return (outer.getArguments() as Node[]).includes(expression);
+  if (Node.isPropertyAssignment(outer) || Node.isVariableDeclaration(outer)) return outer.getInitializer() === expression;
+  if (Node.isBinaryExpression(outer)) return outer.getRight() === expression && outer.getOperatorToken().getKind() === SyntaxKind.EqualsToken;
+  if (Node.isArrowFunction(outer)) return outer.getBody() === expression;
+  if (Node.isConditionalExpression(outer)) return outer.getWhenTrue() === expression || outer.getWhenFalse() === expression;
+  return Node.isArrayLiteralExpression(outer) || Node.isReturnStatement(outer) || Node.isAsExpression(outer) || Node.isSatisfiesExpression(outer);
+}
+
+/** A unit that's a function: not a class's constructor, or an accessor, which aren't called as functions are. */
+function isFunctionUnit(unit: Node): boolean {
+  return !Node.isClassDeclaration(unit) && !Node.isClassExpression(unit) && !Node.isConstructorDeclaration(unit) &&
+    !Node.isGetAccessorDeclaration(unit) && !Node.isSetAccessorDeclaration(unit) && !Node.isSourceFile(unit);
 }
 
 function push<K, V>(map: Map<K, V[]>, key: K, value: V): void {

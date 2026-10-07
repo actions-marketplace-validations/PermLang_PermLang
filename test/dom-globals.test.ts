@@ -2,11 +2,12 @@
 // global function, so they need their own match. The conformance fixtures share one project
 // without lib.dom, which is why this runs as a separate project.
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { checkTsConfig, type Report } from "../src/check.js";
+import { removeTemporary } from "./temporary.js";
 
 let dir: string;
 let report: Report;
@@ -27,7 +28,7 @@ beforeAll(() => {
   report = checkTsConfig(path.join(dir, "tsconfig.json"), { strictness: "development" });
 }, 60_000);
 
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+afterAll(() => removeTemporary(dir));
 
 const reached = (fn: string) =>
   report.diagnostics.filter((d) => d.message.includes(`${fn} `)).map((d) => d.message).join("\n");

@@ -2,6 +2,16 @@ name: PermLang
 
 # PermLang checks its own source with its own GitHub Action, comments the
 # permission diff on pull requests, and uploads its findings to code scanning.
+#
+# Two jobs check the same code:
+# - `permissions` runs the pull request's own copy of PermLang (`uses: ./`), so a
+#   change to PermLang is tried on PermLang itself. That also means a pull request
+#   can change how its own check runs.
+# - `released` runs the last release, pinned to its commit, so a pull request
+#   can't change the code that judges it. It has a lock file of its own,
+#   permlang.released.lock.json, written by that release: a pull request that
+#   changes what PermLang detects changes what the new version sees in this
+#   code, but not what the release sees. Make it a required check.
 
 on:
   pull_request:
@@ -25,3 +35,18 @@ jobs:
         with:
           args: src
           sarif: true
+
+  released:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The released Action builds itself apart from this repository, so this one's
+      # dependencies, whose types it reads (@types/node), are installed here.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - uses: PermLang/permlang@7505fc536c65977724bb6884b7de072c1e04ba1d # v0.4.0
+        with:
+          args: src --lock permlang.released.lock.json
+          comment: false

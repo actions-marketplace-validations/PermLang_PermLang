@@ -6,6 +6,9 @@
 //   - the declaration a call resolves to, which covers `super()`, literal
 //     computed keys (`api["ping"]()`), and calls through const aliases;
 //   - every implementation a call through an interface or base class may reach;
+//   - every function written against a callable interface or type alias, or a
+//     collection of functions, that a call goes through (`ops.get(name)!()`); an
+//     anonymous one stands for the part of its unit inside it (see check.ts);
 //   - every member a computed key could select (`handlers[kind]()`);
 //   - a class's implicit constructor running its base constructor;
 //   - importing a module, which runs its top-level code;
@@ -51,8 +54,15 @@ export interface GraphContext {
 
 export function collectEdges(sourceFile: SourceFile, ctx: GraphContext): Edge[] {
   const edges: Edge[] = [];
+  // A call through an interface can have thousands of implementations: find its unit once.
+  const enclosing = new Map<Node, Node>();
+  const unitAround = (node: Node) => {
+    let found = enclosing.get(node);
+    if (!found) enclosing.set(node, (found = enclosingUnitNode(node)));
+    return found;
+  };
   const add = (fromNode: Node, target: Node | undefined, site: Node, text: string) => {
-    const from = ctx.unitOf(enclosingUnitNode(fromNode));
+    const from = ctx.unitOf(unitAround(fromNode));
     const to = target && ctx.unitOf(target);
     if (!from || !to) return;
     const { line, column } = lineAndColumn(sourceFile, site.getStart());
@@ -212,6 +222,7 @@ export function collectEdges(sourceFile: SourceFile, ctx: GraphContext): Edge[] 
     if (declaration) {
       add(call, unitNodeForDeclaration(declaration), call, text);
       for (const impl of ctx.hierarchy.implementations(declaration)) add(call, impl, call, text);
+      for (const fn of ctx.hierarchy.functionsCalledThrough(declaration)) add(call, fn, call, text);
     }
 
     const computed = computedCallee(call);
@@ -334,18 +345,30 @@ export type Provenance = { capability: Capability; use: Use; edge?: undefined } 
 /** Every capability each unit can reach, keyed by its formatted form. */
 export type Reach = Map<Unit, Map<string, Provenance>>;
 
+export interface PropagateOptions {
+  /**
+   * Whether @perm-unsafe stops a unit's unverifiable code from reaching its callers (the
+   * default). It does for annotations: the code was reviewed, so its callers aren't failed for
+   * it. It doesn't for what a model's input or a protected secret can reach (tools.ts,
+   * flows.ts): reviewed or not, an eval still runs whatever it's given.
+   */
+  vouched?: boolean;
+  /** Uses to count as units' own for this propagation only, such as calls into packages with no adapter. */
+  extraUses?: ReadonlyMap<Unit, readonly Use[]>;
+}
+
 /**
  * What every unit can reach. Linear in the size of the graph: units are grouped into
  * strongly connected components (functions that call each other, directly or not), and
  * the components are visited callees first, so each one is finished once. A unit takes
  * each capability through the first call, in source order, that reaches it.
  */
-export function propagate(units: Iterable<Unit>, edges: readonly Edge[]): Reach {
+export function propagate(units: Iterable<Unit>, edges: readonly Edge[], options: PropagateOptions = {}): Reach {
   const reach: Reach = new Map();
   const ensure = (unit: Unit) => {
     if (reach.has(unit)) return;
     const own = new Map<string, Provenance>();
-    for (const use of unit.uses) {
+    for (const use of [...unit.uses, ...(options.extraUses?.get(unit) ?? [])]) {
       const key = formatCapability(use.capability);
       if (!own.has(key)) own.set(key, { capability: use.capability, use });
     }
@@ -363,7 +386,8 @@ export function propagate(units: Iterable<Unit>, edges: readonly Edge[]): Reach 
   for (const list of outgoing.values()) list.sort((a, b) => a.line - b.line || a.column - b.column);
 
   // @perm-unsafe vouches for code the checker can't see; that doesn't fail its callers.
-  const carries = (edge: Edge, key: string) => key !== UNVERIFIABLE || !edge.to.own?.unsafe;
+  const vouched = options.vouched ?? true;
+  const carries = (edge: Edge, key: string) => !vouched || key !== UNVERIFIABLE || !edge.to.own?.unsafe;
 
   for (const component of componentsCalleesFirst([...reach.keys()], outgoing)) {
     const inside = new Set(component);

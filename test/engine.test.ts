@@ -1,7 +1,7 @@
 // Engine behaviour that needs a project of its own: package boundaries for declaration
 // files, reusing a ts-morph Project, very long call chains, and very deep expressions.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,7 @@ import { checkFiles, checkProject, checkTsConfig, type Report } from "../src/che
 import { holderOf, pathTo, propagate, type Edge } from "../src/graph.js";
 import type { Unit } from "../src/units.js";
 import { lineAndColumn } from "../src/walk.js";
+import { removeTemporary } from "./temporary.js";
 
 const typeRoots = [fileURLToPath(new URL("../node_modules/@types", import.meta.url))];
 const dirs: string[] = [];
@@ -32,19 +33,20 @@ function project(files: Record<string, string>): string {
 }
 
 afterAll(() => {
-  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs) removeTemporary(dir);
 });
 
 const errors = (report: Report, file: string) =>
   report.diagnostics.filter((d) => d.severity === "error" && d.file.endsWith(file)).map((d) => `${d.line} ${d.code} ${d.capability}`);
 
 describe("declaration files for the project's own JavaScript", () => {
-  it("are unverifiable inside the project's package, but not in a package of their own", () => {
+  it("are unverifiable inside the project's package, and a package with no adapter in a package of their own", () => {
     const report = checkTsConfig(project({
       "package.json": JSON.stringify({ name: "app", type: "module" }),
       // Hand-written types for the project's own legacy.js.
       "src/legacy.d.ts": "export declare function run(cmd: string): string;\n",
-      // A generated client in its own package (as Prisma's custom output is): a dependency, not the project's code.
+      // A generated client in its own package (as Prisma's custom output is): a dependency, not the
+      // project's code. (Prisma's own imports its runtime, and is covered by the Prisma detector.)
       "src/generated/client/package.json": JSON.stringify({ name: "prisma-client-generated" }),
       "src/generated/client/index.d.ts": "export declare class PrismaClient { $connect(): Promise<void>; }\n",
       "src/app.ts": [
@@ -58,6 +60,7 @@ describe("declaration files for the project's own JavaScript", () => {
       ].join("\n"),
     }));
     expect(errors(report, "app.ts")).toEqual(["6 PERM004 unverifiable"]);
+    expect(report.unmapped.map((u) => u.package)).toEqual(["prisma-client-generated"]);
     // The declarations themselves aren't functions PermLang analyzed, so they aren't reported or locked.
     expect(report.functions.map((f) => f.name)).toEqual(["t"]);
     const d = report.diagnostics.find((x) => x.code === "PERM004");

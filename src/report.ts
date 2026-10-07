@@ -9,7 +9,7 @@ const RULES: Record<Diagnostic["code"], string> = {
   PERM002: "An @perm annotation is invalid.",
   PERM003: "A function that must declare its permissions has no @perm.",
   PERM004: "Code whose effects can't be determined statically.",
-  PERM005: "The code reaches something permlang.lock.json doesn't record, or no longer reaches something it does.",
+  PERM005: "The code and permlang.lock.json differ (new access, or access the code no longer has), or the lock file is missing, or isn't the one the base commit checks with.",
   PERM006: "A call into a package with no adapter: what it touches isn't checked.",
   PERM007: "An import whose types can't be found: nothing called from it is checked.",
   PERM008: "A tool an AI model can call reaches something dangerous, such as running commands or writing data.",
@@ -112,12 +112,18 @@ const OWN_BREAK = /\n[ \t]*(?=but |which )/;
 
 function formatDiagnostic(d: Diagnostic, cwd: string): string {
   const location = `${relative(d.file, cwd)}:${d.line}:${d.column}`;
-  const own = OWN_BREAK.exec(d.message);
-  const first = own ? d.message.slice(0, own.index) : d.message;
-  const out = [`${printable(location)} ${d.severity} ${d.code}: ${printable(first)}`];
-  if (own) out.push(`  ${printable(d.message.slice(own.index + own[0].length))}`);
+  const [first, reason] = messageLines(d);
+  const out = [`${printable(location)} ${d.severity} ${d.code}: ${first}`];
+  if (reason !== undefined) out.push(`  ${reason}`);
   if (d.fix) out.push(`  -> ${printable(d.fix)}`);
   return out.join("\n");
+}
+
+/** A diagnostic's message as at most two printable lines: split at PermLang's own break, if it has one. */
+function messageLines(d: Diagnostic): [string, string?] {
+  const own = OWN_BREAK.exec(d.message);
+  if (!own) return [printable(d.message)];
+  return [printable(d.message.slice(0, own.index)), printable(d.message.slice(own.index + own[0].length))];
 }
 
 /**
@@ -154,15 +160,17 @@ export function toJson(report: Report, cwd = process.cwd()): string {
 /**
  * GitHub Actions workflow commands, one per diagnostic, so each shows on its line in a pull
  * request. `root` is the repository root (GITHUB_WORKSPACE), which annotation paths are relative to.
- * Errors come first: GitHub shows only the first few annotations of each kind per step.
+ * Errors come first: GitHub shows only the first few annotations of each kind per step. Text
+ * from the code is printable(), as in the text report: an escape sequence or a bidirectional
+ * override would otherwise reach the log and the annotation as it is.
  */
 export function formatAnnotations(report: Report, root: string): string {
   const ordered = [...report.diagnostics].sort((a, b) => Number(a.severity !== "error") - Number(b.severity !== "error"));
   return ordered
     .map((d) => {
-      const message = d.message.split("\n").map((l) => l.trim()).join("\n") + (d.fix ? `\n-> ${d.fix}` : "");
-      const title = `PermLang ${d.code}${d.capability ? `: ${d.capability}` : ""}`;
-      const properties = [`file=${property(relative(d.file, root))}`, `line=${d.line}`, `col=${d.column}`, `title=${property(title)}`];
+      const message = messageLines(d).join("\n") + (d.fix ? `\n-> ${printable(d.fix)}` : "");
+      const title = `PermLang ${d.code}${d.capability ? `: ${printable(d.capability)}` : ""}`;
+      const properties = [`file=${property(printable(relative(d.file, root)))}`, `line=${d.line}`, `col=${d.column}`, `title=${property(title)}`];
       return `::${d.severity === "error" ? "error" : "warning"} ${properties.join(",")}::${data(message)}`;
     })
     .join("\n");

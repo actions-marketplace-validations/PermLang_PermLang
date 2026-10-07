@@ -4,9 +4,13 @@
 //
 //   - WebSocket, EventSource, WebTransport, and WebSocketStream reach the host
 //     they're given; navigator.sendBeacon and XMLHttpRequest's open send to theirs.
-//   - The DOM's Worker and SharedWorker, and importScripts(), run a script the
+//   - The DOM's Worker and SharedWorker, importScripts() (also `self.importScripts`),
+//     a service worker's register(), and a worklet's addModule() run a script the
 //     checker can't see.
-//   - setTimeout("code") evaluates its string, also as window.setTimeout.
+//   - setTimeout("code") evaluates its string, also as window.setTimeout. Where the
+//     program has lib.dom's timers, so does a handler that may be a string (`any`,
+//     `unknown`, `TimerHandler`), and a timer used as a value that may later be
+//     given one (`codes.forEach(setTimeout)`). Node's timers throw on a string.
 //   - process.getBuiltinModule(name) with a computed name could return any module;
 //     process.loadEnvFile() reads a file (./.env by default) into the environment.
 //   - fs's ReadStream and WriteStream open a file but declare no constructor of
@@ -21,7 +25,7 @@ import { packageOf, type AdapterIndex } from "../adapters.js";
 import { UNVERIFIABLE, type Capability } from "../capability.js";
 import { fsCapabilities, fsStreamClass } from "./fs.js";
 import { declarationCapabilities } from "./functions.js";
-import { argumentsOf, containerName, evaluatesString, hostOf, isGlobalLibFunction, literalString, type CallLike } from "./shared.js";
+import { admitsString, argumentsOf, containerName, evaluatesString, hostOf, isGlobalLibFunction, literalString, signatureDeclarations, type CallLike } from "./shared.js";
 
 const NETWORK_CLASSES = new Set(["WebSocket", "EventSource", "WebTransport", "WebSocketStream"]);
 const SCRIPT_CLASSES = new Set(["Worker", "SharedWorker"]);
@@ -31,9 +35,14 @@ const unverifiable: Capability = { name: UNVERIFIABLE };
 
 /**
  * How a function is reached: called with arguments as written, called with arguments that
- * can't be read (`fn.apply(thisArg, list)`), or used as a value (called later, with anything).
+ * can't be read (`fn.apply(thisArg, list)`), used as a value (called later, with anything),
+ * or used as a value that's only ever called with a function first
+ * (`[handler].forEach(setTimeout)`).
  */
-export type Reach = "called" | "called with unknown arguments" | "value";
+export type Reach = "called" | "called with unknown arguments" | "value" | "value given functions";
+
+// Methods of the platform's interfaces that load a script the checker can't see, by interface.
+const SCRIPT_LOADERS = new Map([["WorkerGlobalScope", "importScripts"], ["ServiceWorkerContainer", "register"], ["Worklet", "addModule"]]);
 
 /** `declaration` is the resolved signature of `call`, if any. */
 export function webCapabilities(call: CallLike, declaration: Node | undefined): Capability[] {
@@ -60,10 +69,9 @@ export function platformCapabilities(declaration: Node, args: readonly Node[], r
   if (isGlobalLibFunction(declaration, "importScripts")) return [unverifiable];
   const name = "getName" in declaration ? (declaration as { getName(): string | undefined }).getName() : undefined;
   if (name === undefined) return [];
-  // A timer used as a value is harmless (`promisify(setTimeout)`); called with a string, it runs it.
-  const evaluates = reach === "called with unknown arguments" || (reach === "called" && evaluatesString(args[0]));
-  if (evaluates && TIMERS.has(name) && isTimer(declaration)) return [unverifiable];
+  if (TIMERS.has(name) && isTimer(declaration)) return timerEvaluates(declaration, args, reach) ? [unverifiable] : [];
   const container = containerName(declaration);
+  if (Node.isMethodSignature(declaration) && container !== undefined && SCRIPT_LOADERS.get(container) === name) return [unverifiable];
   if (name === "sendBeacon" && container === "Navigator") return [net(args[0])];
   if (name === "open" && container === "XMLHttpRequest") return [net(args[1])];
   if (container === "Process") return processCapabilities(name, args, reach);
@@ -84,12 +92,13 @@ export function capabilitiesOf(declaration: Node, args: readonly Node[], adapter
  * with no arguments, or one constructed past a cast (`new (window as any).WebSocket(url)`).
  */
 export function constructorCapabilities(type: Type, adapters: AdapterIndex, args: readonly Node[] = []): Capability[] {
-  for (const signature of type.getConstructSignatures()) {
-    // A class with no constructor and no base class has a signature with no declaration, which
-    // ts-morph can't wrap (it throws), so it's checked on the compiler's signature first.
-    const declaration = signature.compilerSignature.declaration && signature.getDeclaration();
-    const capabilities = declaration ? capabilitiesOf(declaration, args, adapters, args.length > 0 ? "called" : "value") : [];
+  const signatures = type.getConstructSignatures();
+  // A class with no constructor and no base class has a signature with no declaration.
+  for (const declaration of signatureDeclarations(signatures)) {
+    const capabilities = capabilitiesOf(declaration, args, adapters, args.length > 0 ? "called" : "value");
     if (capabilities.length > 0) return capabilities;
+  }
+  for (const signature of signatures) {
     const stream = fsStreamClass(signature.getReturnType());
     if (stream) return fsCapabilities(stream.name, stream.direct ? args : []);
   }
@@ -139,6 +148,32 @@ function platformSource(declaration: Node): "lib" | "node" | "undici" | "project
 function isTimer(declaration: Node): boolean {
   if ([...TIMERS].some((name) => isGlobalLibFunction(declaration, name))) return true;
   return Node.isMethodSignature(declaration) && containerName(declaration) === "WindowOrWorkerGlobalScope";
+}
+
+/**
+ * Whether reaching a timer may evaluate a string as code: called with one, or with arguments
+ * that can't be read. Where the program has the browser's timers, also called with something
+ * that may be a string (`any`, `unknown`, `TimerHandler`), or used as a value that may later be
+ * given one. A program with both lib.dom and Node's types may run in a browser, and TypeScript
+ * resolves `setTimeout(x as any)` to Node's declaration there, so the program decides, not the
+ * declaration a call resolves to. A value given only functions (`promisify(setTimeout)`) runs none.
+ */
+function timerEvaluates(declaration: Node, args: readonly Node[], reach: Reach): boolean {
+  if (reach === "called with unknown arguments") return true;
+  if (reach === "called") {
+    const first = args[0];
+    return evaluatesString(first) || (first !== undefined && hasBrowserTimers(declaration) && admitsString(first.getType(), first));
+  }
+  return reach === "value" && hasBrowserTimers(declaration);
+}
+
+/** Whether the program declares the browser's timers: lib.dom's or a worker's, which may share a name with Node's. */
+function hasBrowserTimers(declaration: Node): boolean {
+  if (platformSource(declaration) === "lib") return true;
+  // Otherwise it's Node's global function or variable (see isTimer), and the symbol of its name
+  // is the global one, merged with lib.dom's of the same name.
+  const name = declaration.getFirstChildByKindOrThrow(SyntaxKind.Identifier);
+  return name.getSymbolOrThrow().getDeclarations().some((d) => platformSource(d) === "lib");
 }
 
 function net(arg: Node | undefined): Capability {

@@ -66,12 +66,17 @@ In words: *this change makes the code send data to `api.data-broker.io` from
 It also flags two things code review rarely catches:
 
 - **🤖 Tools you give an AI model.** A function registered as an AI tool (MCP,
-  the Vercel AI SDK, OpenAI Agents, LangChain, LlamaIndex) can be triggered by
-  whoever controls the model's input. PermLang lists every tool and what it can
-  reach, and warns when a model could run commands, write data, send to any
-  address, or read any file or secret it names.
+  the Vercel AI SDK, the OpenAI SDK and OpenAI Agents, LangChain, LlamaIndex,
+  Genkit, and [others](docs/reference.md#tools-given-to-ai-models)) can be
+  triggered by whoever controls the model's input. PermLang lists every tool and
+  what it can reach, and warns when a model could run commands, write data, send
+  to any address, or read any file or secret it names.
 - **🔒 Where secrets may go.** A rule like *"the Stripe key may only be sent to
-  Stripe"* fails any change that lets the key reach another server.
+  Stripe"* fails a change where code that gets hold of the key can also send it
+  somewhere else: another server, an email, a command, or a library PermLang
+  can't see into. It follows the functions that read the key, not the key
+  itself, so a key kept in a variable outside a function isn't tracked
+  ([details](docs/reference.md#data-flow-rules)).
 
 ## Going further: rules in the code
 
@@ -101,8 +106,8 @@ Start gentle and tighten up when you're ready.
 
 | Level | Best for | What fails the build |
 | --- | --- | --- |
-| 🌱 **Sketch** | Trying it on an existing project | Only new access the inventory doesn't record, and rules you add to the settings file yourself (such as where a secret may go). Everything else is just reported. |
-| 🛠️ **Development** (default) | Most teams | Also: functions that break their own rules, and public functions with no rules. |
+| 🌱 **Sketch** | Trying it on an existing project | Only differences from the inventory (new access, access it lists that the code no longer has, or a changed setting), and rules you add to the settings file yourself (such as where a secret may go). Everything else is just reported. |
+| 🛠️ **Development** (default) | Most teams | Also: functions that break their own rules, code that can't be analyzed (such as `eval`), and public functions with no rules. |
 | 🔒 **Production** | Sensitive code | Also: every function, including internal helpers, must be covered by a rule. |
 
 ## Get started
@@ -122,6 +127,11 @@ walks through the rest in about ten minutes.
 > **PermLang is new (v0.x).** Feedback, false positives, and missed access are
 > all welcome as [issues](https://github.com/PermLang/PermLang/issues). See the
 > [changelog](CHANGELOG.md) for what each release changes.
+>
+> **Upgrading from 0.3?** The check fails with one error until you update
+> PermLang (`npm install --save-dev permlang@^0.4.0`), run `npx permlang lock`
+> with the same paths as your check, review the updated inventory, and commit it
+> ([details](docs/reference.md#upgrading-from-03-or-earlier)).
 
 ## What it can't see (yet)
 
@@ -129,10 +139,11 @@ PermLang is upfront about its blind spots, and reports them instead of hiding th
 
 - **Libraries it doesn't know.** It understands many popular ones (Stripe, AI
   SDKs, Redis, databases, HTTP clients, and more). Unknown libraries are listed
-  in every report, so you can decide whether to trust them.
-- **Code that can't be analyzed ahead of time**, such as `eval`, is an error
-  unless a developer marks it as reviewed and gives a reason. Every such
-  exception is listed.
+  in every report, and a change that starts using a new one fails the check
+  until someone reviews it.
+- **Code that can't be analyzed ahead of time**, such as `eval`, is reported.
+  At the default strictness it's an error until a developer marks it as
+  reviewed and gives a reason. Every such exception is listed.
 - A few advanced tricks are documented, with tests, in the
   [reference](docs/reference.md#known-limits).
 
@@ -144,7 +155,8 @@ assistant, or a person. It's built for the pull request nobody reads line by lin
 
 **How do I see what my MCP server's tools can do?**
 Run `npx permlang check src`. The report lists every tool registered with MCP,
-the Vercel AI SDK, OpenAI Agents, LangChain, or LlamaIndex, what each can reach,
+the Vercel AI SDK, the OpenAI SDK, OpenAI Agents, LangChain, LlamaIndex, Genkit,
+and the other frameworks it recognizes, what each can reach,
 and warns when a model could use one to run commands, write data, send to any
 address, or read any file or secret it names.
 [More on AI tools](docs/reference.md#tools-given-to-ai-models).
@@ -158,7 +170,8 @@ PermLang's own repository runs CodeQL too.
 **Does it run my code or send it anywhere?**
 No. It reads your source with the TypeScript compiler and never runs it. Your
 code stays on your machine or CI runner: the command-line tool makes no network
-calls, and the GitHub Action only posts its results to the pull request.
+calls, and the GitHub Action only posts its results to the pull request (and to
+code scanning, if you turn that on).
 
 **Is it free?**
 Yes. PermLang is open source under the Apache 2.0 license.

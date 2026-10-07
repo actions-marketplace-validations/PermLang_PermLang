@@ -27,6 +27,9 @@ export function readWorkflowFile(text: string, kind: "workflow" | "action", sink
     return [];
   }
   for (const problem of yaml.problems) sink.unverifiable(`an alias PermLang can't follow: ${problem.why}`, problem.at);
+  // What GitHub reads past one may not be what's read here, so the rest is read but not trusted.
+  const ambiguous = yaml.ambiguousBreak();
+  if (ambiguous) sink.unverifiable("a line break (U+0085, U+2028 or U+2029) that YAML parsers read differently", ambiguous);
   const reader = new Reader(yaml, sink);
   reader.secrets();
   if (kind === "workflow") reader.workflow();

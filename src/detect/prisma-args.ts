@@ -53,21 +53,41 @@ export function accessor(model: string): string {
   return model.charAt(0).toLowerCase() + model.slice(1);
 }
 
+/**
+ * A query's first argument as written; "unknown" when it can't be read, as for a method
+ * passed along as a value or called through `.call` or `.apply`, which could be given any.
+ */
+export type Arguments = Node | undefined | "unknown";
+
+const UNKNOWN_READ: Capability = { name: "db.read", dynamic: true };
+const UNKNOWN_WRITE: Capability = { name: "db.write", dynamic: true };
+
 /** The tables a query's arguments reach besides its own model's: `args` is the first argument of `findMany`, `update`, ... */
-export function argumentAccess(args: Node | undefined, model: Model, mode: Mode): Capability[] {
+export function argumentAccess(args: Arguments, model: Model, mode: Mode): Capability[] {
+  if (args === "unknown") return mode === "write" ? [UNKNOWN_READ, UNKNOWN_WRITE] : [UNKNOWN_READ];
   if (!args) return [];
   const walk = new Walk(args);
   walk.args(args, model, mode);
   return walk.found;
 }
 
-/** A relation followed by name, as the fluent API does; undefined when `name` isn't a relation. */
-export function relationAccess(name: string, args: Node | undefined, model: Model, at: Node): Capability[] | undefined {
-  const relation = relationsOf(model, at)?.get(name);
+// A fluent client is a promise too: these settle it, and follow no relation.
+const PROMISE_METHODS = new Set(["then", "catch", "finally"]);
+
+/**
+ * A relation followed by name, as the fluent API does; undefined when `name` isn't a
+ * relation. Without the model's relations (a client older than Prisma 5), any method but
+ * a promise's could follow one, to an unknown table.
+ */
+export function relationAccess(name: string, args: Arguments, model: Model, at: Node): Capability[] | undefined {
+  const relations = relationsOf(model, at);
+  if (!relations) return PROMISE_METHODS.has(name) ? undefined : [UNKNOWN_READ];
+  const relation = relations.get(name);
   if (!relation) return undefined;
   const walk = new Walk(at);
   walk.read(relation.model);
-  if (args) walk.args(args, relation.model, "read");
+  if (args === "unknown") walk.unknown("read");
+  else if (args) walk.args(args, relation.model, "read");
   return walk.found;
 }
 

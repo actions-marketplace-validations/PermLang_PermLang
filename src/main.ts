@@ -8,9 +8,10 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { AdapterError, AdapterIndex, loadAdapters } from "./adapters.js";
+import { COMMANDS, DEFAULT_LOCK, USAGE, UsageError, parseArgs, type Args, type Command } from "./args.js";
 import {
   STRICTNESS_LEVELS,
   UNMAPPED_POLICIES,
@@ -22,78 +23,20 @@ import {
   type Strictness,
   type UnmappedPolicy,
 } from "./check.js";
-import { addedDependencies, type DependencyChange, type PackageJson } from "./deps.js";
-import { commentMarker, formatDiffFailure, formatDiffMarkdown, formatDiffText, type DiffNotes, type ViaPaths } from "./diff.js";
+import { addedDependencies, overriddenDependencies, type DependencyChange, type PackageJson } from "./deps.js";
+import { commentMarker, formatDiffFailure, formatDiffMarkdown, formatDiffText, formatNoLock, SUMMARY_LIMIT, type DiffNotes, type ViaPaths } from "./diff.js";
+import { workflowArgs, workflowFile, workflowTarget } from "./init-workflow.js";
 import { LOCK_VERSION, LockError, buildLock, diffLocks, isConfigKey, keyed, lockDrift, parseLock, serializeLock, type LockFile } from "./lock.js";
+import { movedLocks } from "./lock-moves.js";
 import { formatAnnotations, formatText, printable, toJson, toSarif } from "./report.js";
+import { FlowRuleError } from "./flows.js";
 import { DEFAULT_CONFIG, SettingsError, readConfig, readTsConfig, settingsEntries, type Origin, type Settings } from "./settings.js";
 import { checkSpecs, formatSpecResults } from "./spec/check.js";
 import { parseSpecs, type Spec, type SpecError } from "./spec/parse.js";
-
-const USAGE = `Usage:
-  permlang --version                     print the version
-  permlang init  [paths...] [options]    set up: a sketch-level config and a first lock file
-  permlang check [paths...] [options]    check permissions (and the lock file, if there is one)
-  permlang lock  [paths...] [options]    write permlang.lock.json from the current code
-  permlang diff  [base-ref] [paths...]   permission changes since base-ref (default HEAD)
-  permlang spec  [paths...] [options]    check .perm specs against the code (phase 2 groundwork)
-
-Which files: paths, or --project <tsconfig.json>. With neither, ./tsconfig.json
-if present, else ./src.
-
-Options:
-  --project, -p <tsconfig.json>   check the files of a TypeScript project
-  --config <file>                 config file (default: ./permlang.config.json if present)
-  --adapter <file.json>           add an adapter manifest (repeatable)
-  --strictness <level>            sketch | development | production (default: development)
-  --unmapped <policy>             packages with no adapter: warn | error | trust (default: warn)
-  --lock <file>                   lock file (default: ./permlang.lock.json)
-  --no-lock                       check: don't compare against the lock file
-  --require-lock                  check: fail when the lock file is missing (the Action passes
-                                  it when the pull request's base commit has one)
-  --json                          check: print the JSON report
-  --github-annotations            check: also print a GitHub Actions annotation per diagnostic
-                                  (on standard error with --json, so the JSON stays valid)
-  --sarif <file>                  check: also write the findings as SARIF, for GitHub code scanning
-  --head <ref>                    diff: compare against this commit instead of the working tree
-  --format <text|markdown|json>   diff: output format (default: text)
-  --workflow                      init: also add .github/workflows/permlang.yml
-  --spec <file.perm>              spec: check this spec (repeatable; default: every .perm file here)
-
-permlang.config.json:
-  { "strictness": "sketch", "unmapped": "warn", "adapters": ["./permlang/adapters/acme-sms.json"] }
-  Also "tools": "warn" | "error" | "trust", and "flows": [{ "from": "env(KEY)", "to": ["net(host)"] }].
-
-The lock file records which files were checked, and the settings in effect (options
-included): check with the same paths and options it was written with.
-
-Exit codes: 0 no errors, 1 permission errors, 2 anything else (a usage or configuration
-error, a file that can't be read or written, or an internal error).`;
+import { isUncheckedKey, uncheckedEntry } from "./unchecked.js";
 
 const SOURCE_EXTENSIONS = /\.(ts|tsx|mts|cts)$/;
-const DEFAULT_LOCK = "permlang.lock.json";
 const ISSUES = "https://github.com/PermLang/PermLang/issues";
-
-class UsageError extends Error {}
-
-interface Args {
-  paths: string[];
-  adapters: string[];
-  project?: string;
-  config?: string;
-  strictness?: string;
-  unmapped?: string;
-  lock?: string;
-  noLock: boolean;
-  requireLock: boolean;
-  workflow: boolean;
-  specs: string[];
-  json: boolean;
-  githubAnnotations: boolean;
-  sarif?: string;
-  head?: string;
-  format: string;
-}
 
 /** This package's version. package.json sits one level above both src/ and dist/. */
 function packageVersion(): string {
@@ -111,22 +54,40 @@ export function main(argv: string[]): number {
     console.log(packageVersion());
     return 0;
   }
-  if (rest.includes("--help") || rest.includes("-h")) {
+  // Help only on its own: with other arguments (`args: src -h` in a workflow), printing it and
+  // exiting 0 would pass a check that never ran. parseArgs rejects it there.
+  if (rest.length === 1 && (rest[0] === "--help" || rest[0] === "-h") && isCommand(command)) {
     console.log(USAGE);
     return 0;
   }
   try {
-    const args = parseArgs(rest);
+    if (!isCommand(command)) throw new UsageError(`Unknown command "${printable(command)}".\n\n${USAGE}`);
+    const args = parseArgs(command, rest);
     if (command === "init") return init(args);
     if (command === "check") return check(args);
     if (command === "lock") return lock(args);
     if (command === "diff") return diff(args);
-    if (command === "spec") return spec(args);
-    throw new UsageError(`Unknown command "${printable(command)}".\n\n${USAGE}`);
+    return spec(args);
   } catch (e) {
+    // The Action posts diff's markdown over its earlier comment, which would otherwise go on
+    // looking current: a diff that fails, even on its arguments, still prints a comment that says so.
+    if (command === "diff" && rest.some((a, i) => a === "--format" && rest[i + 1] === "markdown")) {
+      console.log(e instanceof NoLockError ? formatNoLock(e.lockFile, diffMarker()) : formatDiffFailure(expectedError(e) ?? `internal error: ${errorMessage(e)}`, diffMarker()));
+    }
     // Exit code 1 means permission errors and nothing else, so CI can tell a failed check from a broken one.
     console.error(expectedError(e) ?? internalError(e));
     return 2;
+  }
+}
+
+function isCommand(command: string): command is Command {
+  return (COMMANDS as readonly string[]).includes(command);
+}
+
+/** A diff with no lock file in the working tree or at the base commit: there's nothing to compare. */
+class NoLockError extends UsageError {
+  constructor(readonly lockFile: string) {
+    super(`No ${lockFile}. Run \`permlang lock\` first.`);
   }
 }
 
@@ -151,36 +112,6 @@ function internalError(e: unknown): string {
   return `PermLang hit an internal error. Please report it at ${ISSUES}, with this:\n${printable(`${error.name}: ${error.message}`)}${frames}`;
 }
 
-function parseArgs(rest: string[]): Args {
-  const args: Args = { paths: [], adapters: [], specs: [], noLock: false, requireLock: false, workflow: false, json: false, githubAnnotations: false, format: "text" };
-  for (let i = 0; i < rest.length; i++) {
-    const arg = rest[i]!;
-    const value = () => {
-      const v = rest[++i];
-      if (v === undefined) throw new UsageError(`${arg} needs a value.`);
-      return v;
-    };
-    if (arg === "--json") args.json = true;
-    else if (arg === "--github-annotations") args.githubAnnotations = true;
-    else if (arg === "--sarif") args.sarif = value();
-    else if (arg === "--no-lock") args.noLock = true;
-    else if (arg === "--require-lock") args.requireLock = true;
-    else if (arg === "--workflow") args.workflow = true;
-    else if (arg === "--spec") args.specs.push(value());
-    else if (arg === "--project" || arg === "-p") args.project = value();
-    else if (arg === "--config") args.config = value();
-    else if (arg === "--adapter") args.adapters.push(value());
-    else if (arg === "--strictness") args.strictness = value();
-    else if (arg === "--unmapped") args.unmapped = value();
-    else if (arg === "--lock") args.lock = value();
-    else if (arg === "--head") args.head = value();
-    else if (arg === "--format") args.format = value();
-    else if (arg.startsWith("-")) throw new UsageError(`Unknown option "${printable(arg)}".\n\n${USAGE}`);
-    else args.paths.push(arg);
-  }
-  return args;
-}
-
 // --- commands ----------------------------------------------------------------
 
 /** Day-one setup: a sketch-level config, optionally the workflow, then a first lock file. Each is kept if it exists. */
@@ -188,7 +119,7 @@ function init(args: Args): number {
   const done: string[] = [];
   // Settled before anything is written, so a path the Action can't use leaves nothing behind.
   const workflow = args.workflow ? workflowTarget() : undefined;
-  const selection = args.workflow ? workflowSelection(args) : "";
+  const actionArgs = workflow ? workflowArgs(args, workflow) : "";
   const configFile = args.config ?? DEFAULT_CONFIG;
   if (existsSync(configFile)) {
     done.push(`Kept ${configFile}.`);
@@ -198,16 +129,16 @@ function init(args: Args): number {
       throw new UsageError(`Strictness must be one of: ${STRICTNESS_LEVELS.join(", ")}.`);
     }
     writeFileSync(configFile, `${JSON.stringify({ strictness }, null, 2)}\n`);
-    const meaning = strictness === "sketch" ? ": rules are reported, not enforced; new access the lock file doesn't record still fails" : "";
+    const meaning = strictness === "sketch" ? ": rules are reported, not enforced; anything the lock file doesn't record still fails: new access, a changed setting, or new code PermLang can't check" : "";
     done.push(`Wrote ${configFile} (strictness ${strictness}${meaning}).`);
   }
 
   if (workflow) {
-    if (existsSync(workflow.file)) {
+    if (workflow.exists) {
       done.push(`Kept ${workflow.shown}.`);
     } else {
       mkdirSync(path.dirname(workflow.file), { recursive: true });
-      writeFileSync(workflow.file, workflowFile(selection, workflow));
+      writeFileSync(workflow.file, workflowFile(actionArgs, workflow));
       done.push(`Wrote ${workflow.shown}: checks every pull request and comments the permission diff.`);
     }
   }
@@ -224,9 +155,13 @@ function init(args: Args): number {
     const report = analyze({ ...args, strictness: undefined });
     const lock = buildLock(report, path.dirname(lockFile));
     writeFileSync(lockFile, serializeLock(lock));
-    const count = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
-    const reaching = Object.keys(lock.functions).length;
-    done.push(`Wrote ${lockName}: ${count(reaching, "function")} ${reaching === 1 ? "reaches" : "reach"} something, across ${count(report.files, "file")}.`);
+    // Configuration entries (the settings, workflows, package.json scripts) aren't functions. There's
+    // always at least one: the settings the lock was written with.
+    const keys = Object.keys(lock.functions);
+    const reaching = keys.filter((k) => !isConfigKey(k)).length;
+    const config = keys.length - reaching;
+    const entries = `${plural(config, "configuration entry", "configuration entries")} ${config === 1 ? "records" : "record"} the settings and project files`;
+    done.push(`Wrote ${lockName}: ${plural(reaching, "function")} ${reaching === 1 ? "reaches" : "reach"} something, across ${plural(report.files, "file")}, and ${entries}.`);
     unmapped = report.unmapped.length;
   }
 
@@ -241,120 +176,15 @@ function init(args: Args): number {
   return 0;
 }
 
-interface WorkflowTarget {
-  /** The repository root, where install steps run. */
-  root: string;
-  file: string;
-  /** `file` as shown to the user, relative to where init runs. */
-  shown: string;
-  /** Where the project is, relative to the root, when init runs in a subfolder (a monorepo package). */
-  workingDirectory?: string;
-}
-
-/** GitHub only runs workflows from .github/workflows at the repository root. */
-function workflowTarget(): WorkflowTarget {
-  const cwd = realpathSync.native(process.cwd());
-  const root = gitRoot() ?? cwd;
-  const sub = path.relative(root, cwd).replaceAll("\\", "/");
-  const name = sub ? `permlang-${sub.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}.yml` : "permlang.yml";
-  const file = path.join(root, ".github", "workflows", name);
-  return { root, file, shown: path.relative(cwd, file).replaceAll("\\", "/"), ...(sub ? { workingDirectory: sub } : {}) };
-}
-
-function gitRoot(): string | undefined {
-  try {
-    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-    return root ? realpathSync.native(root) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** The repository's default branch, from the remote's HEAD; `main` when that isn't known. */
-function defaultBranch(): string {
-  try {
-    const ref = execFileSync("git", ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-    const branch = ref.replace(/^origin\//, "");
-    if (branch) return /^[\w./-]+$/.test(branch) ? branch : JSON.stringify(branch);
-  } catch {
-    // No remote, or its HEAD isn't known locally.
-  }
-  return "main";
-}
-
-/**
- * The Action's `args` for the files init checked. Paths use forward slashes, since the Action runs on
- * Linux, and can't contain spaces, since the Action splits `args` on them.
- */
-function workflowSelection(args: Args): string {
-  const paths = (args.project ? [args.project] : args.paths).map((p) => path.posix.normalize(p.replaceAll("\\", "/")).replace(/(.)\/$/, "$1"));
-  const spaced = paths.find((p) => /\s/.test(p));
-  if (spaced !== undefined) {
-    throw new UsageError(`The GitHub Action can't pass a path with spaces in it ("${spaced}"). Rename it, or list the files in a tsconfig.json and use --project.`);
-  }
-  return args.project ? `--project ${paths[0]}` : paths.join(" ");
-}
-
-/**
- * How to install the project's dependencies in CI, from the lockfile at the repository root. PermLang
- * reads code through the TypeScript compiler: without the dependencies' types (`@types/node` above
- * all), file, process, and environment access are invisible. Install scripts are skipped; they aren't
- * needed for types.
- */
-function installSteps(root: string): string[] {
-  const at = (file: string) => path.join(root, file);
-  // pnpm and Yarn come through Corepack, which Node 25 and later no longer ship.
-  const corepack = ["      - run: npm install --global corepack@latest", "      - run: corepack enable"];
-  if (existsSync(at("pnpm-lock.yaml"))) return [...corepack, "      - run: pnpm install --frozen-lockfile --ignore-scripts"];
-  if (existsSync(at("yarn.lock"))) {
-    // Yarn 2 and later (a .yarnrc.yml, or a lockfile with __metadata) skip install scripts with --mode=skip-build.
-    const modern = existsSync(at(".yarnrc.yml")) || readFileSync(at("yarn.lock"), "utf8").includes("__metadata:");
-    return [...corepack, modern ? "      - run: yarn install --immutable --mode=skip-build" : "      - run: yarn install --frozen-lockfile --ignore-scripts"];
-  }
-  if (existsSync(at("package-lock.json"))) return ["      - run: npm ci --ignore-scripts --no-audit --no-fund"];
-  return ["      - run: npm install --ignore-scripts --no-audit --no-fund"];
-}
-
-/** A workflow that runs the PermLang Action on the same files init checked. */
-function workflowFile(selection: string, target: WorkflowTarget): string {
-  const inputs = [
-    ...(target.workingDirectory ? [`          working-directory: ${target.workingDirectory}`] : []),
-    ...(selection ? [`          args: ${selection}`] : []),
-  ];
-  return [
-    target.workingDirectory ? `name: PermLang (${target.workingDirectory})` : "name: PermLang",
-    "",
-    "on:",
-    "  pull_request:",
-    "  merge_group:",
-    "  push:",
-    `    branches: [${defaultBranch()}]`,
-    "",
-    "permissions:",
-    "  contents: read",
-    "  pull-requests: write",
-    "",
-    "jobs:",
-    "  permissions:",
-    "    runs-on: ubuntu-latest",
-    "    steps:",
-    "      - uses: actions/checkout@v7",
-    "      - uses: actions/setup-node@v7",
-    "        with:",
-    "          node-version: lts/*",
-    "      # PermLang needs your dependencies' types (@types/node above all) to see file, process,",
-    "      # and environment access. If you generate code, such as `prisma generate`, add it here too.",
-    ...installSteps(target.root),
-    "      - uses: PermLang/permlang@v0",
-    ...(inputs.length > 0 ? ["        with:", ...inputs] : []),
-    "",
-  ].join("\n");
-}
-
 function check(args: Args): number {
   if (args.noLock && args.requireLock) throw new UsageError("--no-lock and --require-lock can't be used together.");
   const lockName = args.lock ?? DEFAULT_LOCK;
   const lockFile = path.resolve(lockName);
+  // With --base, the base commit decides whether the lock this check reads is required, and
+  // whether the change stopped checking with the base's own lock.
+  const atBase = args.base !== undefined && fileAt(args.base, lockName) !== undefined;
+  if (atBase && args.noLock) throw new UsageError(`--no-lock turns off the comparison with ${printable(lockName)}, which the base commit has.`);
+  const moved = args.base !== undefined ? movedLocks(args.base, args.noLock ? undefined : lockName) : [];
   let committed: { contents: LockFile; text: string } | undefined;
   if (!args.noLock) {
     if (existsSync(lockFile)) {
@@ -368,7 +198,8 @@ function check(args: Args): number {
   }
   const report = analyze(args);
   if (committed) report.diagnostics.push(...lockDrift(committed.contents, buildLock(report, path.dirname(lockFile)), report, lockFile, committed.text));
-  else if (args.requireLock) report.diagnostics.push(missingLock(lockFile));
+  else if (args.requireLock || atBase) report.diagnostics.push(missingLock(lockFile));
+  if (moved.length > 0) report.diagnostics.push(movedLock(moved, lockFile, !args.noLock));
   report.diagnostics.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.column - b.column);
 
   // Paths in annotations and SARIF are relative to the repository root in GitHub Actions.
@@ -399,6 +230,24 @@ function missingLock(lockFile: string): Diagnostic {
   };
 }
 
+/** --base, when the change stops checking with the lock file the base commit's workflows check with. */
+function movedLock(moved: readonly string[], lockFile: string, reads: boolean): Diagnostic {
+  const old = moved.map(printable).join(", ");
+  const instead = reads ? `, and this check reads ${printable(path.basename(lockFile))} instead` : "";
+  return {
+    severity: "error",
+    code: "PERM005",
+    file: lockFile,
+    line: 1,
+    column: 1,
+    function: "<lock>",
+    capability: "",
+    call: "",
+    message: `This change stops checking with ${old}, which the base commit's workflow checks with${instead}. A lock file the base doesn't check with can approve whatever the change adds.`,
+    fix: `keep checking with ${old}. To move a lock file, first add a check that reads the new one next to the old, and once that's merged, remove the old one.`,
+  };
+}
+
 /** Checks .perm specs' permissions against the code that implements them (phase 2 groundwork). */
 function spec(args: Args): number {
   const files = args.specs.length > 0 ? args.specs : findSpecFiles(".");
@@ -406,7 +255,7 @@ function spec(args: Args): number {
   const specs: Spec[] = [];
   const errors: SpecError[] = [];
   for (const file of files) {
-    if (!existsSync(file)) throw new UsageError(`Not found: ${file}`);
+    if (!existsSync(file)) throw new UsageError(`Not found: ${printable(file)}`);
     const parsed = parseSpecs(readFileSync(file, "utf8"), path.resolve(file), vocabulary);
     specs.push(...parsed.specs);
     errors.push(...parsed.errors);
@@ -416,12 +265,13 @@ function spec(args: Args): number {
   if (args.json) {
     console.log(JSON.stringify({ errors, results: results.map(({ spec: s, ...r }) => ({ spec: s.name, file: s.file, ...r })) }, null, 2));
   } else {
-    for (const e of errors) console.log(`${path.relative(process.cwd(), e.file).replaceAll("\\", "/")}:${e.line} error SPEC001: ${printable(e.message)}`);
+    for (const e of errors) console.log(`${printable(path.relative(process.cwd(), e.file).replaceAll("\\", "/"))}:${e.line} error SPEC001: ${printable(e.message)}`);
     if (errors.length > 0) console.log("");
     console.log(formatSpecResults(results));
   }
-  const failed = errors.length > 0 || results.some((r) => r.diagnostics.some((d) => d.severity === "error"));
-  return failed ? 1 : 0;
+  // A spec that can't be read is an error of its own (2): 1 means permission errors and nothing else.
+  if (errors.length > 0) return 2;
+  return results.some((r) => r.diagnostics.some((d) => d.severity === "error")) ? 1 : 0;
 }
 
 function findSpecFiles(root: string): string[] {
@@ -450,26 +300,22 @@ function lock(args: Args): number {
   if (previous && previous.permlang !== LOCK_VERSION) notes.push(`Updated ${path.basename(lockFile)} from lock format ${previous.permlang} to ${LOCK_VERSION}, which also records the check's settings.`);
   const changes = formatDiffText(diffLocks(previous, next), viaPaths(report, path.dirname(lockFile)));
   const keys = Object.keys(next.functions);
-  const functions = keys.filter((k) => !isConfigKey(k)).length;
+  const functions = keys.filter((k) => !isConfigKey(k) && !isUncheckedKey(k)).length;
   const counts = `${plural(functions, "function")}, ${plural(keys.length - functions, "configuration entry", "configuration entries")}`;
   console.log([`Wrote ${path.relative(process.cwd(), lockFile)} (${counts}).`, ...notes, changes].join("\n\n"));
   return 0;
 }
 
-function diff(args: Args): number {
-  if (!["text", "markdown", "json"].includes(args.format)) throw new UsageError(`--format must be text, markdown, or json.`);
-  // Each folder of a repository gets its own comment: the marker names the folder.
-  const marker = commentMarker(path.relative(process.env.GITHUB_WORKSPACE ?? process.cwd(), process.cwd()));
-  try {
-    return diffAt(args, marker);
-  } catch (e) {
-    // Still a comment, which the Action posts over the previous one rather than leave that looking current.
-    if (args.format === "markdown") console.log(formatDiffFailure(expectedError(e) ?? `internal error: ${errorMessage(e)}`, marker));
-    throw e;
-  }
+/** Each folder of a repository gets its own comment: the marker names the folder. */
+function diffMarker(): string {
+  return commentMarker(path.relative(process.env.GITHUB_WORKSPACE ?? process.cwd(), process.cwd()));
 }
 
-function diffAt(args: Args, marker: string): number {
+/** When it fails, its markdown is still a comment that says so: see main(). */
+function diff(args: Args): number {
+  // --json is short for --format json. A --format wins: the Action adds --format markdown after its args.
+  const format = args.format ?? (args.json ? "json" : "text");
+  if (!["text", "markdown", "json"].includes(format)) throw new UsageError(`--format must be text, markdown, or json.`);
   // diff [base-ref] [paths...]: the paths select the code analyzed for "reached through".
   const [base = "HEAD", ...sources] = args.paths;
   const lockName = args.lock ?? DEFAULT_LOCK;
@@ -481,7 +327,7 @@ function diffAt(args: Args, marker: string): number {
     enforced: !args.noLock,
     baseMissing: baseLock === undefined,
     baseOutdated: baseLock?.permlang === 1,
-    marker,
+    marker: diffMarker(),
   };
   let headLock: LockFile;
   let via: ViaPaths = {};
@@ -493,9 +339,12 @@ function diffAt(args: Args, marker: string): number {
     headLock = found;
   } else {
     const diskLock = existsSync(lockName) ? parseLock(readText(lockName), lockName) : undefined;
-    if (!diskLock && !baseLock) throw new UsageError(`No ${lockName}. Run \`permlang lock\` first.`);
+    // A change can leave the base's lock behind by checking with another one, or with none, which
+    // the check fails. Then there's a diff to show even when neither commit has this lock file.
+    notes.lockMoved = movedLocks(base, args.noLock ? undefined : lockName);
+    if (!diskLock && !baseLock && notes.lockMoved.length === 0) throw new NoLockError(lockName);
     // A pull request that deletes the lock turns the comparison off: the comment must say so.
-    notes.lockDeleted = diskLock === undefined;
+    notes.lockDeleted = diskLock === undefined && baseLock !== undefined;
     notes.lockOutdated = diskLock?.permlang === 1;
     headLock = diskLock ?? { permlang: LOCK_VERSION, functions: {}, unsafe: {} };
     // The working tree is the truth: diff the base against what the code reaches now, not only
@@ -518,14 +367,16 @@ function diffAt(args: Args, marker: string): number {
   const changes = diffLocks(baseLock, headLock);
   notes.dependencies = dependencyChanges(base, args);
   notes.aiTools = aiTools;
-  if (args.format === "json") {
+  if (format === "json") {
     const p = notes.pending;
     const unrecorded = p && p.functions.length + p.unsafeAdded.length + p.unsafeRemoved.length + p.unsafeChanged.length > 0 ? p : null;
-    const status = { analysisError: notes.analysisError ?? null, lockDeleted: notes.lockDeleted === true, baseLockMissing: notes.baseMissing === true };
+    const status = { analysisError: notes.analysisError ?? null, lockDeleted: notes.lockDeleted === true, lockMoved: notes.lockMoved ?? [], baseLockMissing: notes.baseMissing === true };
     console.log(JSON.stringify({ base, head: args.head ?? "working tree", ...changes, via, unrecorded, ...status, dependencies: notes.dependencies, aiTools }, null, 2));
   } else {
-    console.log(args.format === "markdown" ? formatDiffMarkdown(changes, via, notes) : formatDiffText(changes, via, notes));
+    console.log(format === "markdown" ? formatDiffMarkdown(changes, via, notes) : formatDiffText(changes, via, notes));
   }
+  // For a job summary, which takes far more than a comment: the diff uncut, or nearly.
+  if (args.summary) writeText(args.summary, `${formatDiffMarkdown(changes, via, notes, SUMMARY_LIMIT)}\n`);
   return 0;
 }
 
@@ -545,10 +396,29 @@ function analyze(args: Args): Report {
     projectRoot: root,
   };
   const scope = settings.scope;
-  const report = "project" in scope ? checkTsConfig(scope.project, options) : checkFiles(scope.paths.flatMap(expand), options);
-  // What the check ran on and with is recorded in the lock, like what the code reaches.
-  report.functions.push(...settingsEntries(settings, root));
+  const selected = "project" in scope ? readTsConfig(scope.project).fileNames : scope.paths.flatMap(expand);
+  let report: Report;
+  try {
+    report = "project" in scope ? checkTsConfig(scope.project, options) : checkFiles(selected, options);
+  } catch (e) {
+    // A flow rule can only be checked against the adapters once they're loaded.
+    if (e instanceof FlowRuleError) throw new SettingsError(`${path.relative(process.cwd(), settings.configFile)}: ${e.message}`);
+    throw e;
+  }
+  // What the check ran on and with is recorded in the lock, like what the code reaches, and so
+  // are the files it read only because the selected ones import them, and the code it couldn't check.
+  report.functions.push(...settingsEntries(settings, root, importedFiles(report, selected)));
+  const unchecked = uncheckedEntry(report, settings.configFile, root);
+  if (unchecked.actual.length > 0) report.functions.push(unchecked);
   return report;
+}
+
+/** The files analyzed that the paths or the tsconfig.json didn't select: the ones they import. */
+function importedFiles(report: Report, selected: readonly string[]): string[] {
+  // Windows paths differ in case and separator between Node and TypeScript; the file is the same.
+  const key = (file: string) => (process.platform === "win32" ? path.resolve(file).toLowerCase() : path.resolve(file));
+  const chosen = new Set(selected.map(key));
+  return [...new Set(report.units.map((u) => u.file))].filter((file) => !chosen.has(key(file)));
 }
 
 /**
@@ -582,6 +452,8 @@ function settingsFor(args: Args): Settings {
     const targets = args.paths.length > 0 ? args.paths : ["src"];
     const missing = targets.filter((p) => !existsSync(p));
     if (missing.length > 0) throw new UsageError(`Not found: ${missing.map(printable).join(", ")}`);
+    // A check of nothing would pass.
+    if (targets.flatMap(expand).length === 0) throw new UsageError(`No TypeScript files in ${targets.map(printable).join(", ")}.`);
     scope = { paths: targets, given: args.paths.length > 0 };
   }
   return {
@@ -625,10 +497,10 @@ function fileAt(ref: string, file: string): { text: string; spec: string } | und
 }
 
 /**
- * Packages the change adds to ./package.json, or installs from another source, for review. A
- * package.json that's missing or isn't a JSON object means no dependency section, and adapters
- * that can't be loaded (which fails the analysis, and the comment says so) are left out. The
- * commits were read already, so a failure to read them here is an error.
+ * Packages the change adds to ./package.json, installs from another source, or overrides, for
+ * review. A package.json that's missing or isn't a JSON object means no dependency section, and
+ * adapters that can't be loaded (which fails the analysis, and the comment says so) are left out.
+ * The commits were read already, so a failure to read them here is an error.
  */
 function dependencyChanges(base: string, args: Args): DependencyChange[] {
   const head = parsePackage(args.head ? fileAt(args.head, "package.json")?.text : existsSync("package.json") ? readFileSync("package.json", "utf8") : undefined);
@@ -637,7 +509,9 @@ function dependencyChanges(base: string, args: Args): DependencyChange[] {
     const file = path.join("node_modules", name, "package.json");
     return existsSync(file) ? parsePackage(readFileSync(file, "utf8")) : undefined;
   };
-  return addedDependencies(parsePackage(fileAt(base, "package.json")?.text), head, dependencyAdapters(args), installed);
+  const before = parsePackage(fileAt(base, "package.json")?.text);
+  const adapters = dependencyAdapters(args);
+  return [...addedDependencies(before, head, adapters, installed), ...overriddenDependencies(before, head, adapters, installed)];
 }
 
 function parsePackage(text: string | undefined): PackageJson | undefined {

@@ -11,6 +11,8 @@ import { classifyComputedCall, computedCallee } from "./computed.js";
 import { envUses } from "./env.js";
 import { anyEscapes } from "./escapes.js";
 import { fetchCapability, isUnresolvedFetch } from "./fetch.js";
+import { schemaSqlReads } from "./drizzle.js";
+import { computedModels } from "./prisma.js";
 import { declarationCapabilities, isTimer } from "./functions.js";
 import { isUrlSpecifier, loadOf, loadTarget } from "./modules.js";
 import { argumentsOf, callText, literalString, resolveAlias, resolvedDeclaration, unwrapExpression, type CallLike, type CapabilityUse } from "./shared.js";
@@ -35,7 +37,7 @@ export function detectInFile(sourceFile: SourceFile, adapters: AdapterIndex): De
     const call = callText(node);
     found.push({ node, uses: capabilities.map((capability) => ({ capability, call, verb: "calls" })) });
   });
-  found.push(...urlImports(sourceFile), ...envUses(sourceFile), ...valueUses(sourceFile, adapters), ...anyEscapes(sourceFile, adapters));
+  found.push(...urlImports(sourceFile), ...envUses(sourceFile), ...valueUses(sourceFile, adapters), ...anyEscapes(sourceFile, adapters), ...schemaSqlReads(sourceFile), ...computedModels(sourceFile));
   return found;
 }
 

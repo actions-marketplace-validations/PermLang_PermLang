@@ -87,6 +87,19 @@ describe("covers", () => {
     expect(covers([cap("fs.read")], cap("fs.read", "\\\\evil\\share\\x"))).toBe(true);
   });
 
+  // Found in the re-verification: on Windows, `..` can't climb out of a network share, so
+  // `\\server\share\..\x` is `\\server\share\x`, not something in a share named `x`.
+  it("keeps `..` inside a network share", () => {
+    expect(covers([cap("fs.write", "//server/x")], cap("fs.write", "\\\\server\\share\\..\\x\\f"))).toBe(false);
+    expect(covers([cap("fs.write", "//server/share/x")], cap("fs.write", "\\\\server\\share\\..\\x\\f"))).toBe(false);
+    expect(covers([cap("fs.write", "//server/other/../share")], cap("fs.write", "//server/share/f"))).toBe(false);
+    expect(covers([cap("fs.write", "//server/share")], cap("fs.write", "\\\\server\\share\\a\\..\\f"))).toBe(true);
+    expect(covers([cap("fs.write", "//server")], cap("fs.write", "\\\\server\\share\\f"))).toBe(true);
+    // The root of every network path, with no server named, holds them all.
+    expect(covers([cap("fs.write", "//")], cap("fs.write", "\\\\server\\share\\..\\f"))).toBe(true);
+    expect(covers([cap("fs.write", "\\\\")], cap("fs.write", "//server/share/f"))).toBe(true);
+  });
+
   it("does not let one capability stand in for another", () => {
     expect(covers([cap("fs.read", "./data")], cap("fs.write", "./data/x"))).toBe(false);
     expect(covers([cap("db.read", "leads")], cap("db.write", "leads"))).toBe(false);

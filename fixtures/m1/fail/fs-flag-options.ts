@@ -46,3 +46,16 @@ export async function more(raw: string, logPath: string, options: { dest: string
   const handle = await openFile("./data/i.json", "r");
   await handle.chmod(0o777); // expect: error PERM001 fs.write
 }
+
+// Node reads `flag` for readFile and `flags` for streams, and ignores the other name (re-verification).
+/** @perm fs.write(./data) */
+export function readFileFlagsIgnored() {
+  // @ts-expect-error `flags` isn't a readFile option
+  readFileSync("./data/j.json", { flags: "w" }); // expect: error PERM001 fs.read(./data/j.json)
+}
+
+/** @perm fs.read(./data) */
+export function streamFlagIgnored() {
+  // @ts-expect-error `flag` isn't a stream option
+  createReadStream("./data/k.log", { flag: "r", flags: "w" }); // expect: error PERM001 fs.write(./data/k.log)
+}

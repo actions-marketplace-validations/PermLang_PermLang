@@ -6,8 +6,9 @@ change comes with a test that proves it.
 ## Reporting
 
 - **A way to get past PermLang** (code that reaches the network, files, secrets,
-  a database, or processes without being reported): please report it
-  **privately**, as [SECURITY.md](SECURITY.md) describes, not in a public issue.
+  a database, or processes without being reported, or a pull request that adds
+  access without the check failing): please report it **privately**, as
+  [SECURITY.md](SECURITY.md) describes, not in a public issue.
 - **A false positive, a missed access that's already a documented limit, or a
   bug:** open an [issue](https://github.com/PermLang/PermLang/issues/new/choose).
   There's a form for each.
@@ -17,8 +18,8 @@ We aim to reply to every issue and pull request within a week.
 
 ## Setting up
 
-You need Node 22 or later to run the tests. (PermLang itself runs on Node 20.1
-or later.)
+To run the tests, use Node 22.12 or later, which is what Vitest supports.
+(PermLang itself runs on Node 20.1 or later, and CI tests it there too.)
 
 ```bash
 git clone https://github.com/PermLang/PermLang && cd PermLang
@@ -61,9 +62,29 @@ organized.
    `npm run permlang -- check src`. If PermLang's check on itself reports new
    access, that's expected when the change adds some: declare it in `@perm`,
    then run `npm run permlang -- lock src` and commit `permlang.lock.json`.
+   PermLang's code is also checked by its last release, against a lock of its
+   own (see below): run
+   `npm run permlang:released -- lock src --lock permlang.released.lock.json`
+   too, and commit `permlang.released.lock.json`.
 5. **Update the docs and [CHANGELOG.md](CHANGELOG.md)** when behaviour changes,
    including any new known limit.
 6. **Open a pull request.** Every check must pass before it can merge.
+
+PermLang checks its own pull requests twice
+([`.github/workflows/permlang.yml`](.github/workflows/permlang.yml)):
+
+- with the pull request's own copy of the Action (`uses: ./`), so a change to
+  PermLang is tried on PermLang itself, against `permlang.lock.json`;
+- with the last release, pinned to its commit, against
+  `permlang.released.lock.json`, which that release wrote. A pull request can't
+  change the code that runs this check, so it can't change how its own new
+  access is judged. A change to what PermLang detects changes what the new
+  version sees in this code, but not what the release sees, so this lock only
+  changes when PermLang's own code does.
+
+`npm run permlang:released` runs that release, whichever version the workflow
+pins. When Dependabot moves the pin to a new release, relock with it in the same
+pull request.
 
 ## Versions
 

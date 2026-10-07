@@ -10,6 +10,8 @@
 import path from "node:path";
 import { covers, formatCapability, type Capability } from "../capability.js";
 import type { Diagnostic, FunctionReport, Report } from "../check.js";
+import { printable } from "../report.js";
+import { TYPED_ANY } from "../unseen.js";
 import type { Spec } from "./parse.js";
 
 export interface SpecResult {
@@ -34,7 +36,11 @@ export function checkSpecs(specs: readonly Spec[], report: Report): SpecResult[]
     }
     const written = `${spec.implements.file}#${spec.implements.symbol}`;
     const target = normalize(path.resolve(path.dirname(spec.file), spec.implements.file));
-    const matches = report.units.filter((u) => normalize(u.file) === target && (u.name === spec.implements!.symbol || u.qualified === spec.implements!.symbol));
+    const named = report.units.filter((u) => normalize(u.file) === target && (u.name === spec.implements!.symbol || u.qualified === spec.implements!.symbol));
+    // A name that is some function's whole qualified name means that one: `make` is the
+    // top-level make, not also the one nested in `outer` (whose name is `outer.make`).
+    const exact = named.filter((u) => u.qualified === spec.implements!.symbol);
+    const matches = exact.length > 0 ? exact : named;
     if (matches.length === 0) {
       return { ...base, status: "not found" as const, diagnostics: [{ ...at(spec.implements.line), severity: "error" as const, code: "SPEC002" as const, capability: written, message: `perm ${spec.name}: ${written} wasn't found among the checked files.`, fix: "check the path and function name, and that the file is part of the checked sources." }] };
     }
@@ -81,7 +87,7 @@ export function checkSpecs(specs: readonly Spec[], report: Report): SpecResult[]
         code: "SPEC005",
         capability: written,
         message: `perm ${spec.name}: ${implementation.name} reaches code PermLang can't see, so its permissions can't be checked: ${unseen.join("; ")}.`,
-        fix: "install the missing types (@types/node for Node's modules and globals, such as process), then run it again.",
+        fix: unseenFix(unseen),
       });
     }
     // A permission that looks unused may be used by the code that can't be seen.
@@ -100,6 +106,15 @@ export function checkSpecs(specs: readonly Spec[], report: Report): SpecResult[]
     const status = exceeded ? ("perms exceeded" as const) : unseen.length > 0 ? ("unchecked" as const) : ("perms ok" as const);
     return { ...base, implementation, status, diagnostics };
   });
+}
+
+/** How to make what can't be seen checkable: install missing types, or type what's called through `any`. */
+function unseenFix(reasons: readonly string[]): string {
+  const typedAny = reasons.filter((r) => r.includes(TYPED_ANY)).length;
+  const types = "install the missing types (@types/node for Node's modules and globals, such as process)";
+  const any = "give what it calls a type other than any, so PermLang can follow the call";
+  if (typedAny === 0) return `${types}, then run it again.`;
+  return typedAny === reasons.length ? `${any}, then run it again.` : `${types}, and ${any}, then run it again.`;
 }
 
 /** What the matched functions reach, together. A function that reaches nothing isn't in report.functions. */
@@ -131,19 +146,23 @@ function normalize(file: string): string {
   return CASE_INSENSITIVE ? resolved.toLowerCase() : resolved;
 }
 
-/** The report text for `permlang spec`, in the shape of the concept overview's example. */
+/**
+ * The report text for `permlang spec`, in the shape of the concept overview's example. Names,
+ * paths, and capabilities come from the specs and the code, so each goes through printable(),
+ * like the check's report: none can start a line of its own.
+ */
 export function formatSpecResults(results: readonly SpecResult[], cwd = process.cwd()): string {
   const blocks = results.map((r) => {
-    const impl = r.spec.implements ? `${r.spec.implements.file}#${r.spec.implements.symbol}` : "(no implements:)";
+    const impl = r.spec.implements ? printable(`${r.spec.implements.file}#${r.spec.implements.symbol}`) : "(no implements:)";
     const lines = [
-      `perm ${r.spec.name}  ${impl}`,
+      `perm ${printable(r.spec.name)}  ${impl}`,
       `  perms     ${permsLine(r)}`,
       `  must      ${r.must.count} rule${r.must.count === 1 ? "" : "s"}, not verified yet (phase 2)`,
       `  examples  ${r.examples.count} example${r.examples.count === 1 ? "" : "s"}, not run yet (phase 2)`,
     ];
     for (const d of r.diagnostics) {
-      lines.push(`  ${path.relative(cwd, d.file).replaceAll("\\", "/")}:${d.line} ${d.severity} ${d.code}: ${d.message}`);
-      lines.push(`    -> ${d.fix}`);
+      lines.push(`  ${printable(path.relative(cwd, d.file).replaceAll("\\", "/"))}:${d.line} ${d.severity} ${d.code}: ${printable(d.message)}`);
+      lines.push(`    -> ${printable(d.fix)}`);
     }
     return lines.join("\n");
   });
@@ -155,7 +174,7 @@ export function formatSpecResults(results: readonly SpecResult[], cwd = process.
 function permsLine(r: SpecResult): string {
   if (r.status === "not found") return "implementation not found";
   if (r.status === "ambiguous") return "implementation is ambiguous: write its qualified name";
-  if (r.status === "perms exceeded") return `FAIL: reaches ${r.diagnostics.filter((d) => d.code === "SPEC003").map((d) => d.capability).join(", ")}`;
-  if (r.status === "unchecked") return "unchecked: reaches code whose types can't be found";
+  if (r.status === "perms exceeded") return `FAIL: reaches ${r.diagnostics.filter((d) => d.code === "SPEC003").map((d) => printable(d.capability)).join(", ")}`;
+  if (r.status === "unchecked") return "unchecked: reaches code PermLang can't see";
   return "no access beyond the declared scope";
 }

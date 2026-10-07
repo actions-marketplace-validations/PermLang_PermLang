@@ -130,14 +130,35 @@ function pathCovers(declared: string, actual: string): boolean {
   const a = parsePath(actual);
   // Paths under different roots never cover each other: where a relative path falls under an
   // absolute one depends on where the program runs, and `\\server\share` isn't under `/server`.
-  if (d.root !== a.root) return false;
-  const ds = d.segments;
-  const as = a.segments;
-  const up = (s: string[]) => s.filter((x) => x === "..").length;
+  if (d.root !== a.root || !segmentsCover(d.segments, a.segments)) return false;
+  // A network path must also be inside as Windows reads it, where `..` can't climb out of the
+  // share: `\\server\share\..\x` is `\\server\share\x`, not in a share named `x`. (Elsewhere,
+  // `//server/share/../x` is `/server/x`, which the plain reading above checks.)
+  return d.root !== "//" || startsWith(shareSegments(actual), shareSegments(declared));
+}
+
+function segmentsCover(ds: readonly string[], as: readonly string[]): boolean {
+  const up = (s: readonly string[]) => s.filter((x) => x === "..").length;
   // `.`, `..`, `../..`: the working directory or a folder above it, which also holds paths
   // that climb fewer levels. `..` covers `a` and `../b`, but not `../../c`.
   if (up(ds) === ds.length) return up(as) <= ds.length;
-  return as.length >= ds.length && ds.every((s, i) => as[i] === s);
+  return startsWith(as, ds);
+}
+
+function startsWith(segments: readonly string[], prefix: readonly string[]): boolean {
+  return segments.length >= prefix.length && prefix.every((s, i) => segments[i] === s);
+}
+
+/**
+ * A network path's segments as Windows reads them: the server and the share as written (even
+ * `.` or `..`), then the rest with `..` resolved, never above the share.
+ */
+function shareSegments(p: string): string[] {
+  const [server, share, ...rest] = p.split(/[\\/]/).filter((s) => s !== "");
+  if (server === undefined) return [];
+  if (share === undefined) return [server];
+  const below = path.posix.normalize(`/${rest.join("/")}`).split("/").filter((s) => s !== "" && s !== ".");
+  return [server, share, ...below];
 }
 
 /**

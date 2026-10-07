@@ -118,6 +118,13 @@ describe("specs that can't be checked as written", () => {
       expect(check("Admin.build").diagnostics.map((d) => `${d.code} ${d.capability}`)).toEqual(["SPEC003 exec", "SPEC004 net(api.example.com)"]);
     });
 
+    // Found in re-verification: a top-level function next to a nested one with the same name
+    // was always ambiguous, and the fix suggested the same name again.
+    it("takes a name that is some function's full qualified name to mean that one", () => {
+      expect(check("make").status).toBe("perms ok");
+      expect(check("outer.make").diagnostics.map((d) => `${d.code} ${d.capability}`)).toEqual(["SPEC003 exec", "SPEC004 net(api.example.com)"]);
+    });
+
     it("checks a getter and setter of the same property together", () => {
       const result = check("Settings.theme");
       expect(result.status).toBe("perms exceeded");
@@ -164,7 +171,54 @@ describe("specs that can't be checked as written", () => {
 
     it("counts as failing in the summary", () => {
       expect(formatSpecResults(results, notypes)).toContain("6 specs, 5 failing.");
-      expect(formatSpecResults(results, notypes)).toContain("perms     unchecked: reaches code whose types can't be found");
+      expect(formatSpecResults(results, notypes)).toContain("perms     unchecked: reaches code PermLang can't see");
+    });
+  });
+
+  // Found in re-verification: calls through a value typed any passed, though what they run can't be seen.
+  describe("an implementation that calls something typed any", () => {
+    const report = checkFiles([path.join(dir, "src", "loose.ts"), path.join(dir, "loose-run.d.ts")], { strictness: "sketch" });
+    const check = (symbol: string) =>
+      checkSpecs(parseSpecs(`perm x()\n  implements: src/loose.ts#${symbol}\n  perms:\n    db.write(refunds)\n`, specFile).specs, report)[0]!;
+
+    it("is unchecked, and fails, naming the call", () => {
+      const result = check("viaAnyExport");
+      expect(result.status).toBe("unchecked");
+      expect(result.diagnostics.map((d) => `${d.severity} ${d.code}`)).toEqual(["error SPEC005"]);
+      expect(result.diagnostics[0]!.message).toBe(
+        "perm x: viaAnyExport reaches code PermLang can't see, so its permissions can't be checked: it calls run, whose type is any.",
+      );
+      expect(result.diagnostics[0]!.fix).toBe("give what it calls a type other than any, so PermLang can follow the call, then run it again.");
+    });
+
+    it("covers members of an any index, new, a value parsed at run time, and calls through helpers", () => {
+      expect(check("viaAnyIndex").diagnostics[0]!.message).toMatch(/: it calls lib\.exec, whose type is any\.$/);
+      expect(check("viaParsed").diagnostics[0]!.message).toMatch(/: it calls JSON\.parse\(json\)\.Sender, whose type is any; it calls new \(JSON\.parse\(json\)\.Sender\)\(\)\.send, whose type is any\.$/);
+      expect(check("viaHelper").diagnostics[0]!.message).toMatch(/: it calls run, whose type is any \(through viaAnyExport\)\.$/);
+    });
+
+    it("checks typed code as usual", () => {
+      expect(check("shout").status).toBe("perms ok");
+    });
+
+    it("covers tagged templates, and shortens a long name", () => {
+      expect(check("viaTag").diagnostics[0]!.message).toMatch(/: it calls lib\.sql, whose type is any\.$/);
+      expect(check("viaLong").diagnostics[0]!.message).toMatch(
+        /: it calls JSON\.parse\(json\)\.aVeryLongPropertyNameThatGoesOnAndOn\.ano\.\.\., whose type is any\.$/,
+      );
+    });
+
+    it("leaves what a loaded module gives to the module's own checks", () => {
+      // A package loaded with require() is trusted, like any package with no adapter.
+      expect(check("viaRequire").status).toBe("perms ok");
+      // A module with no types is reported once, as that.
+      expect(check("viaImport").diagnostics[0]!.message).toMatch(/: it calls into \.\/nowhere\.js, whose types can't be found\.$/);
+    });
+
+    it("says how to fix both kinds at once", () => {
+      expect(check("viaBoth").diagnostics[0]!.fix).toBe(
+        "install the missing types (@types/node for Node's modules and globals, such as process), and give what it calls a type other than any, so PermLang can follow the call, then run it again.",
+      );
     });
   });
 });

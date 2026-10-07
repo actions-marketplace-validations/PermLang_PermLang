@@ -6,12 +6,18 @@
 
 import {
   Node,
+  SyntaxKind,
+  type BinaryExpression,
   type CallExpression,
   type ClassDeclaration,
   type ClassExpression,
+  type ElementAccessExpression,
   type NewExpression,
+  type ObjectLiteralElementLike,
   type ObjectLiteralExpression,
+  type PropertyAccessExpression,
   type SourceFile,
+  type Type,
   type VariableDeclaration,
 } from "ts-morph";
 import { packageOf } from "./adapters.js";
@@ -30,8 +36,13 @@ export interface ToolRegistration {
   site: Node;
   /** What runs when the model calls the tool: a function, or an object or class whose methods do. */
   handler: Node | undefined;
-  /** The tool runs at the model provider (a hosted web search, say): no code here runs for it. */
-  hosted?: boolean;
+  /**
+   * The tool runs at the model provider (a hosted web search, say): no code here runs for it,
+   * except callbacks it's given (a hosted MCP server's `onApproval`). These are its arguments.
+   */
+  hosted?: readonly Node[];
+  /** Tools given in a way that can't be listed: a whole collection (named `*`), or one entry of it. */
+  unlisted?: boolean;
 }
 
 /**
@@ -47,6 +58,9 @@ const FAMILIES: { matches: (pkg: string) => boolean; name?: string }[] = [
   { matches: (p) => p === "langchain" || p.startsWith("@langchain/") },
   { matches: (p) => p === "llamaindex" || p.startsWith("@llamaindex/") },
   { matches: (p) => p.startsWith("@mastra/") },
+  { matches: (p) => p === "openai" },
+  { matches: (p) => p === "fastmcp" },
+  { matches: (p) => p === "genkit" || p.startsWith("@genkit-ai/"), name: "genkit" },
 ];
 
 /** The framework a package belongs to, as reported, or undefined if it isn't one. */
@@ -56,12 +70,17 @@ export function aiFramework(pkg: string | undefined): string | undefined {
   return family && (family.name ?? pkg);
 }
 
-/** Functions that create or register a tool, including OpenAI Agents' built-in tools that run here. */
-const TOOL_FUNCTION = /^(tool|registerTool|createTool|dynamicTool|betaTool|betaZodTool|zodTool|FunctionTool|shellTool|computerTool|applyPatchTool)$/;
+/**
+ * Functions (and classes) that create or register a tool, including OpenAI Agents' built-in
+ * tools that run here, FastMCP's `addTool`, Genkit's `defineTool`, and the OpenAI SDK's
+ * function-tool helpers (`zodFunction({ function })`, `new ParsingToolFunction(...)`).
+ */
+const TOOL_FUNCTION =
+  /^(tool|registerTool|createTool|dynamicTool|betaTool|betaZodTool|zodTool|FunctionTool|shellTool|computerTool|applyPatchTool|addTool|defineTool|zodFunction|zodResponsesFunction|standardFunction|standardResponsesFunction|ParsingToolFunction)$/;
 /** Classes, and the types factories return (`ProviderDefinedTool`, `FunctionTool`), that are tools. */
 const TOOL_CLASS = /Tool$/;
-/** Where a tool definition keeps the function that runs. */
-const FUNCTION_KEYS = new Set(["execute", "run", "func", "handler", "invoke", "callback", "fn"]);
+/** Where a tool definition keeps the function that runs (`function` is the OpenAI SDK's). */
+const FUNCTION_KEYS = new Set(["execute", "run", "func", "handler", "invoke", "callback", "fn", "function"]);
 /** Where a built-in tool keeps the object that runs it: OpenAI Agents' shellTool, computerTool, applyPatchTool. */
 const IMPLEMENTATION_KEYS = new Set(["shell", "computer", "editor"]);
 /** The types of tools that run at the model provider. */
@@ -85,16 +104,21 @@ function registrationsAt(call: CallExpression | NewExpression): ToolRegistration
   const framework = declaration && aiFramework(packageOf(declaration));
   if (!declaration || !framework) return [];
   const args = call.getArguments();
-  const out = plainTools(args, framework);
   const name = calleeName(call, declaration);
 
   // MCP's low-level API: one handler serves every tool call.
   if (name === "setRequestHandler") {
-    if (servesToolCalls(args[0])) out.push({ name: "*", framework, site: call, handler: lastFunction(args) });
-    return out;
+    return servesToolCalls(args[0]) ? [{ name: "*", framework, site: call, handler: lastFunction(args) }] : [];
   }
-  if (isToolFactory(call, name)) out.push({ name: toolName(call), framework, site: call, ...handlerOf(call) });
-  return out;
+  if (isToolFactory(call, name)) return [{ name: toolName(call), framework, site: call, ...handlerOf(call) }];
+  return collectedTools(call, name, framework);
+}
+
+/** A call or `new` that registers a tool: a framework's tool factory, or your own subclass of its tool class. */
+function isRegistration(call: CallExpression | NewExpression): boolean {
+  if (Node.isNewExpression(call) && toolSubclass(call)) return true;
+  const declaration = resolvedDeclaration(call);
+  return declaration !== undefined && aiFramework(packageOf(declaration)) !== undefined && isToolFactory(call, calleeName(call, declaration));
 }
 
 /** The called function's or class's name, from its declaration, without a bundler's rename suffix. */
@@ -118,7 +142,7 @@ function declaredName(call: CallExpression | NewExpression, declaration: Node): 
  * LlamaIndex's `FunctionTool.from(...)`.
  */
 function isToolFactory(call: CallExpression | NewExpression, name: string | undefined): boolean {
-  if (Node.isNewExpression(call)) return TOOL_CLASS.test(String(name)) || frameworkToolBase(classOf(call.getExpression())) !== undefined;
+  if (Node.isNewExpression(call)) return TOOL_CLASS.test(String(name)) || TOOL_FUNCTION.test(String(name)) || frameworkToolBase(classOf(call.getExpression())) !== undefined;
   return TOOL_FUNCTION.test(String(name)) || TOOL_CLASS.test(String(frameworkTypeName(call)));
 }
 
@@ -164,7 +188,7 @@ function handlerOf(call: CallExpression | NewExpression): Pick<ToolRegistration,
     const handler = definition && definitionHandler(definition);
     if (handler) return { handler };
   }
-  return { handler: undefined, hosted: runsAtProvider(call) };
+  return runsAtProvider(call) ? { handler: undefined, hosted: args } : { handler: undefined };
 }
 
 function lastFunction(args: readonly Node[]): Node | undefined {
@@ -176,19 +200,36 @@ function lastFunction(args: readonly Node[]): Node | undefined {
  * schema `{ run: "boolean" }`) isn't it; one typed `any` (`execute: execSync as any`) is a
  * second choice, after real functions.
  */
-function definitionHandler(definition: ObjectLiteralExpression): Node | undefined {
+function definitionHandler(definition: ObjectLiteralExpression, depth = 0): Node | undefined {
   let untyped: Node | undefined;
+  let unknownKey: Node | undefined;
   for (const p of definition.getProperties()) {
-    if (Node.isSpreadAssignment(p)) continue;
-    const key = p.getName();
-    if (IMPLEMENTATION_KEYS.has(key)) return p;
-    if (!FUNCTION_KEYS.has(key)) continue;
+    // A definition spread in from a constant: its handler counts (`tool({ ...shellDefinition })`).
+    if (Node.isSpreadAssignment(p)) {
+      const spread = depth < 8 ? objectLiteralOf(p.getExpression()) : undefined;
+      untyped ??= spread && definitionHandler(spread, depth + 1);
+      continue;
+    }
+    const key = keyOf(p);
+    if (key !== undefined && IMPLEMENTATION_KEYS.has(key)) return p;
+    if (key !== undefined && !FUNCTION_KEYS.has(key)) continue;
     // A method, or a property or shorthand whose value is a function.
     const type = p.getType();
-    if (type.getCallSignatures().length > 0) return p;
-    if (type.isAny()) untyped ??= p;
+    if (type.getCallSignatures().length > 0) {
+      if (key !== undefined) return p;
+      // A computed key that can't be read (`[k]: fn`) could be the handler's.
+      unknownKey ??= p;
+    } else if (type.isAny()) untyped ??= p;
   }
-  return untyped;
+  return untyped ?? unknownKey;
+}
+
+/** A property's key as the program sees it: `execute`, `"execute"`, `[K]` with a constant K; undefined when it can't be known. */
+function keyOf(property: ObjectLiteralElementLike): string | undefined {
+  if (Node.isSpreadAssignment(property)) return undefined;
+  const name = property.getNameNode();
+  if (Node.isComputedPropertyName(name)) return literalString(name.getExpression());
+  return Node.isStringLiteral(name) ? name.getLiteralValue() : name.getText();
 }
 
 /**
@@ -202,44 +243,283 @@ function runsAtProvider(call: CallExpression | NewExpression): boolean {
   return HOSTED_TOOL.test(String(frameworkTypeName(call)));
 }
 
-/** Tools written as plain objects in a `tools` option: `generateText({ tools: { shell: { execute } } })`. */
-function plainTools(args: readonly Node[], framework: string): ToolRegistration[] {
+// --- tools given in a collection ------------------------------------------------
+//
+// A `tools` option (`generateText({ tools: { shell: { execute } } })`, `new Agent({ tools: [...] })`,
+// `runTools({ tools: [...] })`), the OpenAI SDK's `toolHandlers` record, and FastMCP's
+// `addTools([...])`. Each entry is a plain object with a handler (a tool), a schema (the app
+// answers the model itself), a tool a framework built (registered where it's made), or a
+// tool's name. Anything else could be any tool, and so could a collection that can't be
+// listed: a parameter, a function's result, `Object.fromEntries(...)`, options spread in from
+// elsewhere, or a record changed in ways that can't be read. Each of those is reported as a
+// tool that can't be followed, when its type allows a tool the framework runs: a schema-only
+// list (the OpenAI SDK's `create({ tools })`) can't hold one.
+
+interface Entry {
+  /** Where it's written: an element, a record's property, or an assignment that adds it. */
+  site: Node;
+  /** Its key in a record, when it's known. */
+  key?: string;
+  value: Node;
+}
+
+/** What a collection holds: entries that can be read, and parts that can't. */
+interface Listing {
+  entries: Entry[];
+  unlisted: Node[];
+}
+
+/** The tools a call to an AI framework is given in a collection. */
+function collectedTools(call: CallExpression | NewExpression, name: string | undefined, framework: string): ToolRegistration[] {
+  const args = call.getArguments();
   const out: ToolRegistration[] = [];
-  for (const arg of args) {
-    const property = objectLiteralOf(arg)?.getProperty("tools");
-    if (!property) continue;
-    // A list (`[{ name, run }]`) or a record (`{ shell: { execute } }`, spreads included). A
-    // list or record passed from elsewhere (a parameter) isn't followed.
-    const value = unwrapExpression(valueNode(property));
-    const entries = Node.isArrayLiteralExpression(value)
-      ? value.getElements().map((element) => ({ site: element, definition: objectLiteralOf(element), key: undefined }))
-      : recordEntries(objectLiteralOf(value));
-    for (const { site, definition, key } of entries) {
-      if (definition && isDefinition(definition)) out.push({ name: key ?? nameProperty(definition) ?? "tool", framework, site, handler: definitionHandler(definition) });
+  if (name === "addTools" && args[0]) out.push(...listedTools(args[0], framework, false));
+  for (const [i, arg] of args.entries()) {
+    for (const key of ["tools", "toolHandlers"]) {
+      for (const option of optionValues(arg, key, declaredOption(call, i, key))) {
+        if ("value" in option) out.push(...listedTools(option.value, framework, key === "toolHandlers"));
+        else out.push(unlistedTool(option.unseen, framework));
+      }
     }
   }
   return out;
 }
 
-/** What a property holds: its initializer, or, for a shorthand (`{ tools }`), the property itself. */
-function valueNode(property: Node): Node {
-  return Node.isPropertyAssignment(property) ? property.getInitializerOrThrow() : property;
+/** The type of option `key` in the parameter at `index` of the signature a call resolves to, if it has one. */
+function declaredOption(call: CallExpression | NewExpression, index: number, key: string): Type | undefined {
+  // (registrationsAt resolved this call already, through resolvedDeclaration, so it resolves.)
+  const parameter = call.getProject().getTypeChecker().getResolvedSignature(call)?.getParameters()[index];
+  return parameter?.getTypeAtLocation(call).getProperty(key)?.getTypeAtLocation(call);
 }
 
-/** A record's entries, with those of the records spread into it (`{ ...shared, shell }`). */
-function recordEntries(record: ObjectLiteralExpression | undefined, depth = 0): { site: Node; definition: ObjectLiteralExpression | undefined; key: string }[] {
-  // Records spread into each other in a loop end here.
-  if (!record || depth > 8) return [];
-  return record.getProperties().flatMap((entry) =>
-    Node.isSpreadAssignment(entry)
-      ? recordEntries(objectLiteralOf(entry.getExpression()), depth + 1)
-      : [{ site: entry, definition: objectLiteralOf(valueNode(entry)), key: entry.getName() }],
-  );
+/**
+ * Where an options argument sets `key`: the values it's given, and options that can't be read
+ * and could set it to tools (`generateText(options)`, `{ ...options, prompt }`). For an
+ * argument that isn't written out, its parameter's declared type says whether it could.
+ */
+function optionValues(options: Node, key: string, declared: Type | undefined, depth = 0): ({ value: Node } | { unseen: Node })[] {
+  const literal = depth <= 8 ? objectLiteralOf(options) : undefined;
+  if (!literal) {
+    const type = options.getType();
+    const own = type.isAny() || type.isUnknown() ? undefined : type.getProperty(key)?.getTypeAtLocation(options);
+    const could = depth === 0 ? declared !== undefined && holdsTools(declared, options) : type.isAny() || type.isUnknown() || (own !== undefined && holdsTools(own, options));
+    return could ? [{ unseen: options }] : [];
+  }
+  return literal.getProperties().flatMap((p) => {
+    if (Node.isSpreadAssignment(p)) return optionValues(p.getExpression(), key, undefined, depth + 1);
+    return keyOf(p) === key ? [{ value: Node.isPropertyAssignment(p) ? p.getInitializerOrThrow() : p }] : [];
+  });
 }
 
-/** A plain object that defines a tool the framework runs: it has a handler key. Schema-only definitions (handled by the app) don't. */
+/** The tools in a collection; for `toolHandlers`, each entry is the handler itself. */
+function listedTools(collection: Node, framework: string, handlers: boolean): ToolRegistration[] {
+  const out: ToolRegistration[] = [];
+  const { entries, unlisted } = listing(collection, 0);
+  for (const { site, key, value } of entries) {
+    const definition = handlers ? undefined : objectLiteralOf(value);
+    if (definition) {
+      const d = nestedDefinition(definition);
+      if (isDefinition(d)) out.push({ name: key ?? nameProperty(d) ?? "tool", framework, site, handler: definitionHandler(d) });
+      continue;
+    }
+    if (!handlers && madeByFramework(value, 0)) continue;
+    // A function given as the tool is its handler.
+    const named = unwrapExpression(value);
+    if (handlers || isCallable(value.getType())) out.push({ name: key ?? (Node.isIdentifier(named) ? named.getText() : "tool"), framework, site, handler: value });
+    else if (isTool(value.getType(), value, true)) out.push(unlistedTool(value, framework, key));
+  }
+  for (const node of unlisted) if (holdsTools(node.getType(), node)) out.push(unlistedTool(node, framework));
+  return out;
+}
+
+function unlistedTool(site: Node, framework: string, key?: string): ToolRegistration {
+  return { name: key ?? "*", framework, site, handler: undefined, unlisted: true };
+}
+
+/** A collection's entries: an array's elements, a record's properties, with what's spread into them, and what's added to a constant later. */
+function listing(collection: Node, depth: number, root = collection): Listing {
+  const out: Listing = { entries: [], unlisted: [] };
+  const merge = (more: Listing) => {
+    out.entries.push(...more.entries);
+    out.unlisted.push(...more.unlisted);
+  };
+  // Collections spread into each other in a loop end here, reported where they were given.
+  if (depth > 8) return { entries: [], unlisted: [root] };
+  const n = unwrapExpression(collection);
+  if (Node.isArrayLiteralExpression(n)) {
+    for (const element of n.getElements()) {
+      if (Node.isSpreadElement(element)) merge(listing(element.getExpression(), depth + 1, root));
+      else if (!Node.isOmittedExpression(element)) out.entries.push({ site: element, value: element });
+    }
+    return out;
+  }
+  if (Node.isObjectLiteralExpression(n)) {
+    for (const p of n.getProperties()) {
+      if (Node.isSpreadAssignment(p)) merge(listing(p.getExpression(), depth + 1, root));
+      else out.entries.push({ site: p, key: keyOf(p), value: Node.isPropertyAssignment(p) ? p.getInitializerOrThrow() : p });
+    }
+    return out;
+  }
+  const constant = constantOf(n);
+  const initializer = constant?.getInitializer();
+  if (!constant || !initializer) return { entries: [], unlisted: [collection] };
+  merge(listing(initializer, depth + 1, root));
+  merge(laterEntries(constant, depth, root));
+  return out;
+}
+
+/** Methods that add to a list, whose arguments are entries. */
+const ADDING = new Set(["push", "unshift"]);
+/** Methods that can put something in a list without saying what. */
+const INSERTING = new Set(["splice", "fill", "copyWithin"]);
+/** Functions that change their first argument in ways that can't be read. */
+const CHANGING = new Set(["Object.assign", "Object.defineProperty", "Object.defineProperties", "Reflect.set", "Reflect.defineProperty"]);
+
+/**
+ * What's added to a constant's record or list after it's created: `tools.shell = {...}`,
+ * `tools[name] = ...`, `list.push(...)`. Other changes (`Object.assign(tools, more)`,
+ * `splice`, `tools.shell.execute = run`) can't be listed. A function the constant is passed
+ * to could change it too; that isn't followed.
+ */
+function laterEntries(constant: VariableDeclaration, depth: number, root: Node): Listing {
+  const out: Listing = { entries: [], unlisted: [] };
+  for (const reference of constant.findReferencesAsNodes()) {
+    const parent = reference.getParentOrThrow();
+    if (Node.isCallExpression(parent) && parent.getArguments()[0] === reference && CHANGING.has(unwrapExpression(parent.getExpression()).getText())) {
+      out.unlisted.push(parent);
+      continue;
+    }
+    // The members it reaches: `tools.shell`, `tools["shell"].execute`.
+    let top: PropertyAccessExpression | ElementAccessExpression | undefined;
+    let members = 0;
+    for (let p = parent; (Node.isPropertyAccessExpression(p) || Node.isElementAccessExpression(p)) && p.getExpression() === (top ?? reference); p = p.getParentOrThrow()) {
+      top = p;
+      members++;
+    }
+    if (!top) continue;
+    const use = top.getParentOrThrow();
+    if (Node.isBinaryExpression(use) && use.getLeft() === top && isAssignment(use)) {
+      // `tools.shell = {...}` adds an entry; `tools.shell.execute = run` changes one.
+      const key = Node.isPropertyAccessExpression(top) ? top.getName() : literalString(top.getArgumentExpression());
+      if (members === 1 && use.getOperatorToken().getKind() === SyntaxKind.EqualsToken) out.entries.push({ site: use, key, value: use.getRight() });
+      else out.unlisted.push(use);
+    } else if (Node.isCallExpression(use) && use.getExpression() === top && Node.isPropertyAccessExpression(top)) {
+      // Calling an entry, or a method that reads, changes nothing.
+      if (members > 1) continue;
+      if (ADDING.has(top.getName())) {
+        for (const arg of use.getArguments()) {
+          if (Node.isSpreadElement(arg)) {
+            const added = listing(arg.getExpression(), depth + 1, root);
+            out.entries.push(...added.entries);
+            out.unlisted.push(...added.unlisted);
+          } else out.entries.push({ site: arg, value: arg });
+        }
+      } else if (INSERTING.has(top.getName())) out.unlisted.push(use);
+    }
+  }
+  return out;
+}
+
+function isAssignment(binary: BinaryExpression): boolean {
+  const operator = binary.getOperatorToken().getKind();
+  return operator >= SyntaxKind.FirstAssignment && operator <= SyntaxKind.LastAssignment;
+}
+
+/** The OpenAI SDK's chat tools nest the definition: `{ type: "function", function: { name, parameters, function } }`. */
+function nestedDefinition(definition: ObjectLiteralExpression): ObjectLiteralExpression {
+  const inner = definition.getProperties().find((p) => keyOf(p) === "function");
+  const nested = inner && Node.isPropertyAssignment(inner) ? objectLiteralOf(inner.getInitializerOrThrow()) : undefined;
+  return nested ?? definition;
+}
+
+/**
+ * A plain object that defines a tool the framework runs: it has a handler key (or a key that
+ * can't be read, holding a function), or a definition spread in that has one. Schema-only
+ * definitions (handled by the app) don't.
+ */
 function isDefinition(definition: ObjectLiteralExpression): boolean {
-  return definition.getProperties().some((p) => !Node.isSpreadAssignment(p) && FUNCTION_KEYS.has(p.getName()));
+  return definitionHandler(definition) !== undefined || definition.getProperties().some((p) => !Node.isSpreadAssignment(p) && FUNCTION_KEYS.has(keyOf(p) ?? ""));
+}
+
+/**
+ * A value a framework built, so registered where it's made, or a tool's name: a tool factory's
+ * result (`tool({...})`, `new ShellTool()`), what a function of yours returns when every
+ * `return` gives one, a string, or a value whose type the framework declares (a parameter
+ * typed as its `Tool`). A plain object built some other way isn't.
+ */
+function madeByFramework(value: Node, depth: number): boolean {
+  const n = unwrapExpression(value);
+  const type = n.getType();
+  if (type.isString() || type.isStringLiteral()) return true;
+  if (depth > 8) return false;
+  if (Node.isCallExpression(n) || Node.isNewExpression(n)) {
+    if (isRegistration(n)) return true;
+    const returns = firstPartyReturns(n);
+    if (returns) return returns.length > 0 && returns.every((r) => madeByFramework(r, depth + 1));
+  }
+  const constant = constantOf(n);
+  if (constant?.hasInitializer()) return madeByFramework(constant.getInitializerOrThrow(), depth + 1);
+  const symbol = type.getAliasSymbol() ?? type.getSymbol();
+  const declaration = symbol?.getDeclarations()[0];
+  if (declaration && aiFramework(packageOf(declaration)) !== undefined) return true;
+  // An instance of your own subclass of a framework's tool class.
+  return declaration !== undefined && (Node.isClassDeclaration(declaration) || Node.isClassExpression(declaration)) && frameworkToolBase(declaration) !== undefined;
+}
+
+/** What a call to a function of your own can return, or undefined when it isn't one. */
+function firstPartyReturns(call: CallExpression | NewExpression): Node[] | undefined {
+  if (Node.isNewExpression(call)) return undefined;
+  // The declaration of the signature called: a function, arrow function, or method.
+  const fn = resolvedDeclaration(call);
+  if (!fn || isThirdParty(fn) || !(Node.isFunctionDeclaration(fn) || Node.isArrowFunction(fn) || Node.isFunctionExpression(fn) || Node.isMethodDeclaration(fn))) return undefined;
+  const body = fn.getBody();
+  if (!body) return undefined;
+  if (!Node.isBlock(body)) return [body];
+  const returns: Node[] = [];
+  body.forEachDescendant((d, traversal) => {
+    if (Node.isFunctionLikeDeclaration(d) || Node.isClassDeclaration(d) || Node.isClassExpression(d)) traversal.skip();
+    else if (Node.isReturnStatement(d)) {
+      const expression = d.getExpression();
+      if (expression) returns.push(expression);
+    }
+  });
+  return returns;
+}
+
+/**
+ * Whether a value of this type could be a tool a framework runs: a function (a handler
+ * itself), or an object with a function-valued handler key, directly or in the OpenAI SDK's
+ * nested `function`. A type that says nothing (any, unknown) could be, when `unknownCould`.
+ */
+function isTool(type: Type, at: Node, unknownCould: boolean): boolean {
+  if (type.isAny() || type.isUnknown()) return unknownCould;
+  if (type.isUnion() || type.isIntersection()) return parts(type).some((t) => isTool(t, at, false));
+  if (isCallable(type)) return true;
+  if (!type.isObject()) return false;
+  return type.getProperties().some((p) => {
+    const t = p.getTypeAtLocation(at);
+    if (FUNCTION_KEYS.has(p.getName()) && isCallable(t)) return true;
+    if (IMPLEMENTATION_KEYS.has(p.getName()) && t.isObject()) return true;
+    return p.getName() === "function" && !isCallable(t) && t.getProperties().some((q) => FUNCTION_KEYS.has(q.getName()) && isCallable(q.getTypeAtLocation(at)));
+  });
+}
+
+/** A union's or an intersection's members. */
+function parts(type: Type): Type[] {
+  return type.isUnion() ? type.getUnionTypes() : type.getIntersectionTypes();
+}
+
+/** Whether a collection of this type (a list, or a record) could hold a tool a framework runs. */
+function holdsTools(type: Type, at: Node, unknownCould = true, depth = 0): boolean {
+  if (type.isAny() || type.isUnknown()) return unknownCould;
+  if (depth > 3) return false;
+  if (type.isUnion() || type.isIntersection()) return parts(type).some((t) => holdsTools(t, at, false, depth));
+  if (isTool(type, at, false)) return true;
+  const element = type.getArrayElementType() ?? type.getNumberIndexType() ?? type.getStringIndexType();
+  // (A tuple's elements are its number index type.)
+  if (element) return holdsTools(element, at, false, depth + 1);
+  // A record of tools: `{ shell: {...}, weather }`.
+  return type.isObject() && type.getProperties().some((p) => isTool(p.getTypeAtLocation(at), at, false));
 }
 
 /**
@@ -269,11 +549,11 @@ function toolSubclass(call: NewExpression): ToolRegistration | undefined {
   const base = frameworkToolBase(chain.at(-1)!);
   if (!base) return undefined;
   const framework = aiFramework(packageOf(base))!;
-  // LangChain runs `_call`; for other frameworks, any method could be what runs.
-  const run = chain.flatMap((c) => c.getMethods()).find((m) => m.getName() === "_call" && m.hasBody());
+  // The whole class: LangChain runs `_call` through `invoke`, but a subclass can override
+  // `invoke` (or anything else the framework calls), so any of its methods could be what runs.
   // Its `name = "..."` field, else the class's name as written.
   const name = chain.map((c) => literalString(c.getProperty("name")?.getInitializer())).find((n) => n !== undefined);
-  return { name: name ?? call.getExpression().getText(), framework, site: call, handler: run ?? cls };
+  return { name: name ?? call.getExpression().getText(), framework, site: call, handler: cls };
 }
 
 /** The class an expression names: a class declaration, or a constant holding a class expression. */
@@ -337,7 +617,7 @@ function toolName(call: CallExpression | NewExpression): string {
 
 function nameProperty(definition: ObjectLiteralExpression): string | undefined {
   for (const key of ["name", "id"]) {
-    const p = definition.getProperty(key);
+    const p = definition.getProperties().find((q) => keyOf(q) === key);
     const value = p && Node.isPropertyAssignment(p) ? literalString(p.getInitializer()) : undefined;
     if (value !== undefined) return value;
   }
@@ -361,7 +641,10 @@ export interface ReachContext {
  */
 export function handlerReach(tool: ToolRegistration, ctx: ReachContext): Set<string> {
   const out = new Set<string>();
-  if (tool.hosted) return out;
+  if (tool.hosted) {
+    for (const options of tool.hosted) callbackReach(options, ctx, out);
+    return out;
+  }
   if (!tool.handler) return out.add(UNVERIFIABLE);
   valueReach(tool.handler, ctx, out, 0);
   // A built-in tool can be given a factory (`computer: () => new LocalComputer()`, or
@@ -425,6 +708,41 @@ function valueReach(node: Node, ctx: ReachContext, out: Set<string>, depth: numb
   }
   // Anything else (a call's result, a computed value) could be anything.
   out.add(UNVERIFIABLE);
+}
+
+/**
+ * What the callbacks among a hosted tool's options reach (`onApproval`, which runs here when the
+ * provider asks). Options that can't be seen (a spread, a parameter) could hold one, when their
+ * type allows a function.
+ */
+function callbackReach(options: Node, ctx: ReachContext, out: Set<string>): void {
+  const literal = objectLiteralOf(options);
+  if (!literal) {
+    if (hasCallableProperty(options.getType(), options)) out.add(UNVERIFIABLE);
+    return;
+  }
+  for (const p of literal.getProperties()) {
+    if (Node.isSpreadAssignment(p)) callbackReach(p.getExpression(), ctx, out);
+    else if (isCallable(p.getType())) valueReach(p, ctx, out, 0);
+  }
+}
+
+/** An object type with a function-valued property of its own (not a method every array or object has). */
+function hasCallableProperty(type: Type, at: Node): boolean {
+  if (type.isAny() || type.isUnknown()) return true;
+  const parts = type.isUnion() ? type.getUnionTypes() : [type];
+  return parts.some(
+    (t) => (t.isObject() || t.isIntersection()) && t.getProperties().some((p) => isCallable(p.getTypeAtLocation(at)) && !p.getDeclarations().every((d) => isStandardLibrary(d.getSourceFile()))),
+  );
+}
+
+/** TypeScript's own lib files (lib.es5.d.ts, lib.dom.d.ts, ...). */
+function isStandardLibrary(file: SourceFile): boolean {
+  return /[\\/]typescript[\\/]lib[\\/]lib\.[^\\/]*\.d\.ts$/.test(file.getFilePath());
+}
+
+function isCallable(type: Type): boolean {
+  return type.getCallSignatures().length > 0 || type.getUnionTypes().some((t) => t.getCallSignatures().length > 0);
 }
 
 /** Adds what a unit reaches, if `unitNode` is one. */

@@ -27,7 +27,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Node } from "ts-morph";
 import { BUILTIN_VOCABULARY, CAPABILITY_NAME, UNVERIFIABLE, parsePermList, type Capability } from "./capability.js";
-import { containerName, hostOf, literalString, nodeRequestHost, nodeSocketHost } from "./detect/shared.js";
+import { containerName, hostOf, literalString, nodeRequestHost, nodeSessionHost, nodeSocketHost } from "./detect/shared.js";
+import { printable } from "./report.js";
 
 interface Template {
   name: string;
@@ -41,6 +42,8 @@ export interface Adapter {
   defines: string[];
   default?: Template[];
   functions: Map<string, Template[]>;
+  /** A team's own manifest, rather than one PermLang ships. */
+  team?: true;
 }
 
 export interface ParsedManifest {
@@ -51,8 +54,9 @@ export interface ParsedManifest {
 }
 
 export class AdapterError extends Error {
+  /** `errors` name fields, capabilities, and files from the manifest: each is one line of the message. */
   constructor(readonly errors: string[]) {
-    super(`Invalid adapter manifest:\n${errors.map((e) => `  ${e}`).join("\n")}`);
+    super(`Invalid adapter manifest:\n${errors.map((e) => `  ${printable(e)}`).join("\n")}`);
   }
 }
 
@@ -76,7 +80,7 @@ export function builtinAdapterPaths(): string[] {
 export function loadAdapters(extra: readonly string[]): { adapters: Adapter[]; errors: string[] } {
   const adapters: Adapter[] = [];
   const errors: string[] = [];
-  for (const file of [...extra, ...builtinAdapterPaths()]) {
+  for (const [i, file] of [...extra, ...builtinAdapterPaths()].entries()) {
     let raw: unknown;
     try {
       raw = JSON.parse(readFileSync(file, "utf8"));
@@ -88,7 +92,7 @@ export function loadAdapters(extra: readonly string[]): { adapters: Adapter[]; e
     errors.push(...manifestErrors);
     if (!manifest) continue;
     for (const pkg of manifest.packages) {
-      adapters.push({ package: pkg, source: file, defines: manifest.defines, default: manifest.default, functions: manifest.functions });
+      adapters.push({ package: pkg, source: file, defines: manifest.defines, default: manifest.default, functions: manifest.functions, ...(i < extra.length ? { team: true as const } : {}) });
     }
   }
   return { adapters, errors };
@@ -193,16 +197,31 @@ export class AdapterIndex {
     return adapters !== undefined && adapters.every((a) => (a.default ?? []).length === 0 && [...a.functions.values()].every((t) => t.length === 0));
   }
 
-  constructor(adapters: readonly Adapter[]) {
+  /**
+   * @param localPackageOf The package a declaration in a folder of the project's with its own
+   *   package.json belongs to (see units.ts). Only a team's adapters cover one: its package.json
+   *   could claim any name, such as that of a package PermLang declares pure.
+   */
+  constructor(adapters: readonly Adapter[], private readonly localPackageOf: (declaration: Node) => string | undefined = () => undefined) {
     for (const a of adapters) this.byPackage.set(a.package, [...(this.byPackage.get(a.package) ?? []), a]);
     this.vocabulary = new Set([...BUILTIN_VOCABULARY, ...adapters.flatMap((a) => a.defines)]);
   }
 
+  /** Whether a team's adapter covers `name`, which is what covers a package in the project's folders. */
+  hasTeamPackage(name: string): boolean {
+    return this.teamAdapters(name).length > 0;
+  }
+
+  private teamAdapters(name: string): Adapter[] {
+    return (this.byPackage.get(name) ?? []).filter((a) => a.team);
+  }
+
   /** What calling `declaration` with `args` touches; pass no args for a function used as a value. */
   forDeclaration(declaration: Node, args: readonly Node[]): Capability[] {
-    const pkg = packageOf(declaration);
-    const adapters = pkg === undefined ? undefined : this.byPackage.get(pkg);
-    if (pkg === undefined || !adapters) return [];
+    const installed = packageOf(declaration);
+    const pkg = installed ?? this.localPackageOf(declaration);
+    const adapters = pkg === undefined ? undefined : installed !== undefined ? this.byPackage.get(pkg) : this.teamAdapters(pkg);
+    if (pkg === undefined || !adapters || adapters.length === 0) return [];
 
     const key = functionKey(declaration);
     const listed = key === undefined ? undefined : adapters.find((a) => a.functions.has(key))?.functions.get(key);
@@ -219,10 +238,12 @@ function instantiate(t: Template, args: readonly Node[], pkg: string): Capabilit
   if (t.arg === undefined || typeof t.arg === "string") return t.arg === undefined ? { name: t.name } : { name: t.name, arg: t.arg };
   const { kind, index } = t.arg;
   // {host:N+}: Node's http.request(url, options), where options can replace the URL's host.
+  // http2.connect(authority, options) passes its options on to net or tls, where their `host` wins.
   const value =
     kind === "arg" ? literalString(args[index])
     : t.arg.overridable ? nodeRequestHost(args, index)
     : NODE_SOCKET_PACKAGES.has(pkg) ? nodeSocketHost(args, index)
+    : pkg === "http2" ? nodeSessionHost(args, index)
     : hostOf(args[index]);
   return value === undefined ? { name: t.name, dynamic: true } : { name: t.name, arg: value };
 }

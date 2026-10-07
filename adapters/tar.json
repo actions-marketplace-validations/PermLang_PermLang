@@ -4,6 +4,11 @@
   "default": ["fs.read"],
   "functions": {
     "TarCommand()": ["fs.read", "fs.write"],
+    "TarCommand.syncFile": ["fs.read", "fs.write"],
+    "TarCommand.asyncFile": ["fs.read", "fs.write"],
+    "TarCommand.syncNoFile": ["fs.read", "fs.write"],
+    "TarCommand.asyncNoFile": ["fs.read", "fs.write"],
+    "TarCommand.validate": [],
     "create": ["fs.read", "fs.write"],
     "c": ["fs.read", "fs.write"],
     "extract": ["fs.read", "fs.write"],

@@ -8,15 +8,17 @@
 //   - a project file: its top-level code runs, and any of its exports can be called
 //     (call-graph edges, see graph.ts);
 //   - a package with no adapter: trusted, and listed like any call into it (PERM006);
-//   - JSON, an asset, or a package declared pure: nothing;
+//   - data (JSON, an asset; see loadsData), or a package declared pure: nothing;
 //   - anything else is unverifiable: a module whose functions carry capabilities
 //     (child_process, fs, a database client, a package an adapter maps), a URL, a
 //     computed specifier, or a file outside the project (JavaScript behind a .d.ts).
 
 import { isBuiltin } from "node:module";
+import path from "node:path";
 import { Node, SyntaxKind, ts, type CallExpression, type SourceFile } from "ts-morph";
 import { packageName, type AdapterIndex } from "../adapters.js";
 import { isRequire, requiresCapabilityModule } from "./functions.js";
+import { emitsCommonJs, importCallsUseRequire } from "./module-format.js";
 import { literalString, resolvedDeclaration, unwrapExpression, type CallLike } from "./shared.js";
 
 export type LoadTarget =
@@ -74,9 +76,10 @@ export function loadTarget(load: Load, adapters: AdapterIndex): LoadTarget {
   const resolved = resolve(specifier, from, mode);
   const file = resolved && from.getProject().getSourceFile(resolved);
   if (file && !file.isDeclarationFile() && !file.getFilePath().split("/").includes("node_modules")) return { kind: "file", file };
-  if (isAsset(specifier) || resolved?.endsWith(".json")) return { kind: "none" };
-  // A relative path that isn't a project file: JavaScript the checker doesn't analyze.
-  if (specifier.startsWith(".") || specifier.startsWith("/")) return { kind: "unverifiable" };
+  const viaRequire = mode === "require" || importCallsUseRequire(from);
+  if (loadsData(specifier, from, viaRequire) || (!viaRequire && resolved?.endsWith(".json"))) return { kind: "none" };
+  // A path that isn't a project file: JavaScript the checker doesn't analyze.
+  if (isPath(specifier)) return { kind: "unverifiable" };
 
   const name = packageName(specifier);
   if (adapters.isPure(name)) return { kind: "none" };
@@ -85,18 +88,58 @@ export function loadTarget(load: Load, adapters: AdapterIndex): LoadTarget {
   return { kind: "package", name };
 }
 
-function resolve(specifier: string, from: SourceFile, mode: "require" | "import"): string | undefined {
+function resolve(specifier: string, from: SourceFile, mode: "require" | "import", options: ts.CompilerOptions = {}): string | undefined {
   const project = from.getProject();
   const resolutionMode = mode === "require" ? ts.ModuleKind.CommonJS : ts.ModuleKind.ESNext;
-  return ts.resolveModuleName(specifier, from.getFilePath(), project.getCompilerOptions(), project.getModuleResolutionHost(), undefined, undefined, resolutionMode)
+  const compilerOptions = { ...project.getCompilerOptions(), ...options };
+  return ts.resolveModuleName(specifier, from.getFilePath(), compilerOptions, project.getModuleResolutionHost(), undefined, undefined, resolutionMode)
     .resolvedModule?.resolvedFileName;
+}
+
+// --- data and code -----------------------------------------------------------
+
+/**
+ * Whether loading `specifier` loads data rather than code. A bundler, or Node's ES module
+ * loader, loads a stylesheet, an image, or JSON as what it is (Node won't load an unknown
+ * extension at all). Node's require() runs any file but a .json one as JavaScript, and
+ * adds `.js` to a path that doesn't exist: `require("./theme.css")` runs ./theme.css, or
+ * ./theme.css.js. So through require(), only a .json file that exists is data.
+ */
+export function loadsData(specifier: string, from: SourceFile, viaRequire: boolean): boolean {
+  if (!viaRequire) return isAsset(specifier);
+  // Node picks the loader by the exact extension (`./data.JSON` runs as JavaScript), and
+  // a query string is part of the file name.
+  if (!specifier.endsWith(".json")) return false;
+  if (isPath(specifier)) return from.getProject().getFileSystem().fileExistsSync(path.resolve(from.getDirectoryPath(), specifier));
+  // A package's file: TypeScript finds it when it's told it may resolve JSON.
+  return resolve(specifier, from, "require", { resolveJsonModule: true })?.endsWith(".json") === true;
+}
+
+/**
+ * A path rather than a package name: relative, or absolute on any system (`/opt/x.js`,
+ * `C:/x.js`), since where the code runs may not be where it's checked.
+ */
+function isPath(specifier: string): boolean {
+  return specifier.startsWith(".") || path.posix.isAbsolute(specifier) || path.win32.isAbsolute(specifier);
+}
+
+/**
+ * Whether a module reference loads through require(): `import x = require()` always does,
+ * and an `import`, `export ... from`, or `import()` does in a file TypeScript compiles to
+ * CommonJS.
+ */
+export function referenceUsesRequire(reference: Node): boolean {
+  if (Node.isImportEqualsDeclaration(reference)) return true;
+  if (Node.isCallExpression(reference)) return importCallsUseRequire(reference.getSourceFile());
+  return emitsCommonJs(reference.getSourceFile());
 }
 
 // Non-code imports that bundlers handle; TypeScript doesn't resolve them without declarations.
 const ASSET = /\.(css|scss|sass|less|styl|svg|png|jpe?g|gif|webp|avif|ico|json|md|mdx|txt|wasm|html)$/i;
 
 /**
- * A stylesheet, image, or other file a bundler loads, judged by the path alone: a query
+ * A stylesheet, image, or other file a bundler loads, judged by the path alone (enough
+ * only for an ES import; see loadsData): a query
  * or fragment (`./styles.css?inline`) doesn't change what's loaded, so `./evil.js?x=.css`
  * is still a script. A URL is never an asset: `data:text/javascript,...//.css` is code.
  */

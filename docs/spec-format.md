@@ -39,8 +39,10 @@ perm process_refund(order: Order, reason: Text) -> RefundResult
   relative to the `.perm` file. A method is `Class.method`. When the name matches
   more than one function in the file (`build` in two namespaces, say), the check
   fails until you write the qualified name, with the namespaces and functions it's
-  declared in: `src/reports.ts#Reports.build`. A getter and a setter of the same
-  property are checked together.
+  declared in: `src/reports.ts#Reports.build`. A name that is one function's whole
+  qualified name means that function: `#make` is a top-level `make`, even when
+  another function declares a `make` of its own (that one is `#outer.make`). A
+  getter and a setter of the same property are checked together.
 - **`must:`**: one rule per line, in plain language.
 - **`examples:`**: one per line, as `input -> expected`.
 - **`perms:`**: the capabilities the implementation may reach, in the same
@@ -62,11 +64,13 @@ perm process_refund  src/refunds.ts#processRefund
   perms     no access beyond the declared scope
   must      3 rules, not verified yet (phase 2)
   examples  2 examples, not run yet (phase 2)
+
+1 spec, 0 failing.
 ```
 
 | Code | Meaning |
 | --- | --- |
-| SPEC001 | The spec file is invalid. |
+| SPEC001 | The spec file is invalid. `permlang spec` then exits 2, like any other error in what it was given; 1 means permission errors only. |
 | SPEC002 | The `implements:` function wasn't found among the checked files, or its name matches more than one function. |
 | SPEC003 | The implementation reaches something `perms:` doesn't allow. The check fails. |
 | SPEC004 | `perms:` allows something the implementation never uses (a warning, to keep specs minimal). |
@@ -78,20 +82,28 @@ declaration from any `@perm` on the function; both are checked.
 
 A spec never passes on code PermLang can't see. If the implementation, or
 anything it calls, uses an import whose types can't be found or a name with no
-declaration (Node's `child_process` or `process` without `@types/node`, say), its
-access is invisible, so the spec is **unchecked** (`SPEC005`) and the check fails:
+declaration (Node's `child_process` or `process` without `@types/node`, say), or
+calls something typed `any` (a package export declared `any`, a member of an
+`any` index, `JSON.parse(text).send()`), its access is invisible, so the spec is
+**unchecked** (`SPEC005`) and the check fails:
 
 ```
 perm process_refund  src/refunds.ts#processRefund
-  perms     unchecked: reaches code whose types can't be found
+  perms     unchecked: reaches code PermLang can't see
   ...
-  refunds.perm:2 error SPEC005: perm process_refund: processRefund reaches code PermLang can't see, so its permissions can't be checked: it calls into node:child_process, whose types can't be found.
+  refunds.perm:3 error SPEC005: perm process_refund: processRefund reaches code PermLang can't see, so its permissions can't be checked: it calls into node:child_process, whose types can't be found.
     -> install the missing types (@types/node for Node's modules and globals, such as process), then run it again.
+
+1 spec, 1 failing.
 ```
 
+The fix says what to do: install the missing types, or give what's called a type
+other than `any`. An `any` value that the implementation passes somewhere else to
+be called (a callback typed `any`) isn't noticed.
+
 Unused permissions aren't reported for an unchecked spec, since the code that
-can't be seen may use them. Calls into packages with no adapter are trusted, as
-in `permlang check`, which lists them.
+can't be seen may use them. Calls into packages with no adapter are trusted
+here; `permlang check` lists them, and its lock file records them.
 
 ## What comes next
 

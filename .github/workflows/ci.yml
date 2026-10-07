@@ -27,7 +27,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - run: npm ci
+      # Without install scripts, as the release build runs it, so what passes here is what ships.
+      - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
@@ -52,7 +53,8 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
+      # Without install scripts, as the release build runs it, so what passes here is what ships.
+      - run: npm ci --ignore-scripts
       - run: npm run test:coverage
       # Pull requests from forks get no OIDC token, so a failed upload doesn't fail the job.
       - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1

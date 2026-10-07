@@ -6,6 +6,7 @@
     "Process.kill": ["exec"],
     "Process.execve": ["exec"],
     "Process.dlopen": ["unverifiable"],
-    "Process.chdir": ["fs.read({arg:0})", "fs.write({arg:0})"]
+    "Process.chdir": ["fs.read({arg:0})", "fs.write({arg:0})"],
+    "ProcessReport.writeReport": ["fs.write({arg:0})"]
   }
 }

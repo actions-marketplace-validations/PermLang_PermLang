@@ -35,9 +35,10 @@ function expectationsIn(file: string): string[] {
   );
 }
 
-// Team-written adapters used by fixtures; the built-in adapters load automatically.
+// Team-written adapters used by fixtures, in adapters/ folders; the built-in adapters load
+// automatically. (Other .json files are data the fixtures load.)
 const fixtureAdapters = readdirSync(fixturesRoot, { recursive: true, encoding: "utf8" })
-  .filter((f) => f.endsWith(".json"))
+  .filter((f) => f.endsWith(".json") && f.split(/[\\/]/).includes("adapters"))
   .map((f) => path.join(fixturesRoot, f));
 
 let report: Report;

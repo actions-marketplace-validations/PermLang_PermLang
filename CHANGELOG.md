@@ -2,6 +2,292 @@
 
 All notable changes to PermLang.
 
+## 0.4.1 (2026-10-06)
+
+Nothing that passed with 0.4.0 fails with 0.4.1.
+
+### Fixed
+
+- **The pull-request comment said "Check settings changed" twice** when the
+  check's settings were the only change, as on the first pull request after
+  upgrading a lock from 0.3, and "New code PermLang can't check" twice when
+  that was the only change. It now says each once.
+
+### Project
+
+- **PermLang's own pull requests are also checked by its last release**, pinned
+  to its commit, which a pull request can't change. Before, they were checked
+  only by their own copy of PermLang, so a pull request could change how its
+  own new access was judged. See [CONTRIBUTING.md](CONTRIBUTING.md).
+- Tests clean up their temporary folders in a way that tolerates Windows
+  holding a folder open for a moment, which occasionally failed a test run.
+
+## 0.4.0 (2026-10-06)
+
+This release fixes the problems a full code review of 0.3 found, and the ones a
+second, independent round of testing then found in those fixes: ways a pull
+request could add access without the check failing or the comment showing it,
+and access the analysis didn't see. It reports more than 0.3 did, and it's
+stricter about the lock.
+
+**Upgrading: every existing lock fails once.** The first check after upgrading
+fails with a single error, `permlang.lock.json was written by an older
+PermLang (lock format 1)`. Run `permlang lock` once, with the paths and
+options your check uses, review the changes, and commit them. That includes
+GitHub Action users on `@v0`, who get 0.4.0 automatically. If you also run
+PermLang from npm, update it first (`npm install --save-dev permlang@^0.4.0`):
+`^0.3` never installs 0.4, and 0.3 can't read a 0.4 lock. See
+[upgrading from 0.3](docs/reference.md#upgrading-from-03-or-earlier).
+
+### What newly fails
+
+- **The lock must match the code exactly.** Access the lock records but the
+  code doesn't reach is an error, not a warning, so deleting or moving a
+  function needs a relock. New, removed or reworded `@perm-unsafe` overrides
+  are errors too.
+- **The lock records more, and a change to any of it fails until relocked:**
+  - the settings: strictness, `unmapped`, `tools`, each flow rule, and each
+    adapter, whether set in `permlang.config.json`, on the command line, or in
+    the Action's inputs;
+  - which files are checked, including the project's own files the checked
+    paths import from elsewhere (`../lib`, `scripts/`);
+  - the TypeScript project's `include`, `exclude` and `files`, and the compiler
+    options that decide what an import is (`module`, `esModuleInterop`, ...),
+    with the values TypeScript actually uses;
+  - the code PermLang can't check: packages with no adapter and imports with no
+    types. A new one fails even with `"unmapped": "trust"`.
+- **More access is reported** (see below). Each new finding shows as new access
+  until the lock records it. Some results are bare instead of scoped, because
+  the code can redirect them: `fetch(url, init)` with an `init` that isn't
+  written out, an http agent other than Node's own, mysql2 `query()` values
+  typed by an interface.
+- **The Action fails a pull request that stops checking with the base commit's
+  lock file**, for example by changing `--lock` in `args` or the
+  `working-directory`. To move a lock, add a check for the new one first, then
+  remove the old one in a later pull request. A pull request that deletes the
+  lock fails too.
+- **Each command rejects options it doesn't take**, with exit 2 and the right
+  option's name (`check takes --json, not --format`). `--help` must be used on
+  its own.
+- **Flow rules:**
+  - An adapter's action, such as `email.send`, is a place data goes: list it in
+    `"to"` to allow it. An action no adapter defines is a configuration error.
+  - A function holding the protected data that calls into a package with no
+    adapter, or an import with no types, fails: PermLang can't see where that
+    code sends it.
+  - Data a function writes into an object its caller passed in (headers filled
+    in by a helper) is followed.
+  - Code in `@perm-unsafe` functions counts.
+  - A host written with a scheme, port or path (`net(https://api.stripe.com)`)
+    is a configuration error that says what to write.
+- **Explicit rules fail at sketch strictness.** Only the annotation rules
+  (PERM001 to PERM004) are relaxed at sketch. A broken flow rule (PERM009),
+  `"tools": "error"` and `"unmapped": "error"` now fail there too.
+- **Exit code 2 for everything that isn't a permission error:** a missing
+  `--lock` file you named, unknown config keys, a broken `tsconfig.json` or one
+  that selects no files, paths with no TypeScript files, malformed `.perm`
+  specs, and crashes (which exited 1).
+- **Specs:** an implementation PermLang can't fully see, including one that
+  calls through `any`, is "unchecked" (new SPEC005, an error) instead of
+  "perms ok", and a name matching more than one function fails.
+- **`init --workflow`** refuses paths outside the repository or ones the Action
+  can't read.
+- **Node 20.1 or later** is required (`engines`). On 20.0, only top-level files
+  were checked.
+
+### Fixed: the review gate
+
+- **Editing only the lock approved access in advance.** A pull request could add
+  `exec` to a function in the lock with no code change, and a later one could
+  add the `execSync` call; both passed with "No permission changes". The lock
+  must now match the code exactly.
+- **Narrowing what's checked hid code.** Removing a file from `tsconfig.json`'s
+  `include`, or calling into a file outside the checked paths, passed. The lock
+  now records which files are checked, follows imports out of the paths, and
+  records the compiler options that change what an import is.
+- **Deleting the lock, or pointing the Action at another one, turned the check
+  off.** The Action now checks against the base commit's lock (new
+  `check --base <ref>`, which the Action passes), and the comment says when a
+  pull request deletes or abandons it.
+- **A pull request could trigger the 0.3 upgrade grace period** by removing the
+  lock's configuration entries. There's no grace period any more.
+- **A pull request's own config could loosen the check unseen.** Settings are
+  recorded, and changes are listed in the comment under "Check settings
+  changed".
+- **New code PermLang can't see only warned.** A new package with no adapter, a
+  folder of the project's own with its own `package.json`, or an import with no
+  types now fails until the lock records it, and the comment lists it under
+  "New code PermLang can't check".
+- **The comment:**
+  - the new-access table comes first, every value is cut to 500 characters, and
+    one long row can no longer push the others out;
+  - it stays under GitHub's size limit, and the job summary gets the full diff
+    (new `diff --summary <file>`);
+  - when it can't be updated, the step fails instead of leaving a stale comment
+    up;
+  - when the check stopped with an error, or the code couldn't be analyzed, it
+    says so first, never "No permission changes";
+  - each folder in a monorepo gets its own comment, and folders such as `.web`
+    and `web` no longer share one;
+  - the Action finds its comment by its token's own account, and never edits
+    anyone else's.
+- **Text from code is escaped everywhere:** the comment, `permlang spec`,
+  adapter errors and GitHub annotations. It can't inject workflow commands,
+  mention people, create links, or hide text with control characters.
+- **Dependencies:** optional and peer dependencies are listed, and so are
+  packages switched to an alias, URL or git source, and new or changed
+  `overrides`, `resolutions` and `pnpm.overrides`.
+- **Crashes:** a lock key named `toString`, a numeric dependency version, and a
+  lock with merge-conflict markers (`permlang lock` now replaces it, with a
+  warning).
+- **The Action** no longer changes the Node version for your job's later steps
+  on GitHub-hosted runners, no longer makes a full clone shallow, honours a
+  custom `--lock` in `args`, and its cache saves on Windows.
+
+### Fixed: access that went unreported
+
+- **Loading modules.** `import()` and `require()` with a module name held in a
+  constant, an `as const` object or an enum are traced. A module that runs
+  commands, touches files or queries a database is unverifiable, and so is one
+  that can't be traced. `data:`, `http(s):`, `blob:` and `file:` imports are
+  unverifiable. `require` used as a value (`Reflect.apply(require, ...)`,
+  `map(require)`) is unverifiable. `require()` of an asset-looking file
+  (`./theme.css`) follows Node's real rules: it runs as JavaScript.
+- **JavaScript behind your own `.d.ts`.** Calls into it are unverifiable instead
+  of silently trusted.
+- **Functions used as values.** `const run = execSync; run.call(null, "id")`,
+  `const { exec } = cp; promisify(exec)`, `const get = fetch; urls.map(get)`,
+  and functions inside a larger `export default` are reported, and so are
+  constructors reached through an alias, a subclass, a parameter or
+  `Reflect.construct`. Feature checks like `if (globalThis.fetch)` don't count
+  as uses.
+- **Hosts are read the way Node reads them.** The http family connects to
+  `hostname` before `host`. Options that redirect a connection make the host
+  unknown (bare `net`): a spread, `socketPath`, `lookup`, a different host in
+  `tls.connect` or `http2.connect` options, an http `agent` other than Node's
+  own, and fetch's `dispatcher`.
+- **Node APIs that were never matched:** `process.kill`, `process.dlopen`,
+  `cluster.fork` and other process and cluster functions; `process.execve`,
+  `process.loadEnvFile`, `process.binding`, `process.report.writeReport`,
+  `module.register`, `module.enableCompileCache`, the inspector's
+  `Session.post`, `crypto.setEngine`, and `getBuiltinModule` with a computed
+  name. A test now checks every key in the Node adapters against @types/node.
+- **Calls through interfaces** reach every class or object that could stand in
+  for the interface, including ones without `implements`. Calls through a
+  callable type, or through a collection of functions (`Map<string, () =>
+  void>`, `Handler[]`), reach the functions written against it.
+- **Entry points:** `export default withAuth(handler)`, `export default { fetch
+  }`, `export =`, nested namespaces, and route tables, plugin hooks and AI tools
+  handed to a call are checked like exported functions.
+- **Hidden calls:** decorators, getters run by spreading or destructuring,
+  `valueOf` in arithmetic, `yield*`, `using`, `instanceof`, and classes built
+  by functions or mixins.
+- **Browser:** WebSocket, EventSource and WebTransport through aliases and
+  subclasses, `navigator.sendBeacon.call(...)`, timers that may run a string,
+  and the browser's `Worker`, `SharedWorker`, `importScripts`, service workers
+  and worklets (unverifiable).
+- **Files:** `readFile` with a writing `flag`, and streams with a writing
+  `flags`, are writes, read the way Node reads each option; `fchmod`, `fchown`,
+  `futimes` and `WriteStream` are writes; `process.chdir(dir)` needs access to
+  `dir`. On Windows, `/` no longer covers a network share, `.` no longer covers
+  `C:..\x`, and `..` can't climb out of a share.
+- **Environment variables:** `import.meta.env.X` is `env(X)`; env read through
+  nested destructuring (`const { env: { KEY } } = process`) is read by name;
+  and `process.env.X` is still found without @types/node, with a warning.
+- **Constants the program changes.** `as const` objects and enums written
+  anywhere (`Object.assign` however it's reached, `defineProperty`, a method
+  writing `this`, namespaces, CommonJS exports) no longer count as constants.
+- **Capability modules cast to `any`** in more ways: `import x = require()`,
+  `await import()`, re-exports, `Object.values(cp)`, computed reads, copies made
+  with a spread, modules passed as `unknown`, `{}`, `this` or a generic
+  parameter, and functions or classes called past the cast. A default import
+  that the compiler options give no default export is followed too.
+- **Databases:**
+  - Prisma was recognized by the word "prisma" in a file's path, which turned
+    unrelated calls into database access. It's now recognized only by its own
+    package or a generated client's runtime import.
+  - The SQL reader could return a narrower answer than the query
+    (`INSERT INTO leads (SELECT * FROM secrets)` read nothing; `?FROM secrets`
+    hid the keyword). It now returns "unknown" (bare `db.read`/`db.write`)
+    whenever it can't be sure, reads placeholders the way each database does,
+    and very deep nesting no longer crashes it.
+  - Prisma relations (`include`, `select`, `where`, nested writes, the fluent
+    API), query extensions, `findRaw`/`aggregateRaw`, `prisma[model]`, and
+    methods used through `.call` or as values are read.
+  - Drizzle `` sql`…` `` fragments, `sql.raw()`, `StringChunk`, `new SQL`,
+    `sql.fromList`, and the SQL `$defaultFn`/`$onUpdateFn` add to inserts and
+    updates are read.
+  - mysql2 values that could carry a `toSqlString()` method need bare access.
+  - Node's built-in `node:sqlite` is checked like better-sqlite3, and a database
+    client cast to `any` is followed.
+- **Adapters:** Stripe clients configured with a `host`, and Stripe's other
+  hosts; tar extraction, including tar 7's `syncFile`/`asyncFile` functions (a
+  write); cheerio `fromURL` and rxjs `ajax`, `fromFetch` and `webSocket`
+  (network); react-dom `preinit` and lodash `template` (unverifiable).
+- **Very deep or large code** is analyzed instead of crashing the check, and a
+  file that can't be analyzed is unverifiable instead of stopping the run.
+  Propagation is linear: a 16,000-function call chain takes about 6 seconds
+  instead of 30.
+- **Files on more than one drive.** On Windows, a check given files on more
+  than one drive (through the library's `checkFiles`, or folders on two drives
+  on the command line) left some of them out without a word. Every file given
+  is now checked.
+
+### Fixed: workflows and `package.json` scripts
+
+- **YAML anchors hid everything** a workflow granted: its trigger, permissions
+  and Actions. Aliases are now resolved.
+- **Invisible line breaks could hide a secret.** GitHub's runner treats U+0085,
+  U+2028 and U+2029 as line breaks, and the YAML library PermLang uses didn't,
+  so text after one in a comment could be a key only GitHub read. A workflow or
+  Action containing one is now unverifiable.
+- **Secrets written other ways weren't recorded:** `SECRETS.NPM_TOKEN`,
+  `secrets . KEY`, and `secrets[matrix.name]`, `toJSON(secrets)` and
+  `secrets.*`, which record `ci.secret(all)`.
+- **Workspace packages' install scripts** (npm, Yarn, Bun and pnpm workspaces)
+  are recorded, not just the root `package.json`'s.
+- **Local Actions and Docker images** are read and recorded; only an `@sha256:`
+  digest counts as a pinned image.
+- **Files PermLang can't read** are recorded with a hash, so editing them still
+  changes the lock. A broken link no longer crashes the check, a byte-order mark
+  is read normally, and only text inside `${{ }}` and `if:` counts as an
+  expression.
+
+### Fixed: AI tools, flow rules and specs
+
+- **Tools from more frameworks are found:** OpenAI Agents, the OpenAI SDK
+  (`runTools`, `zodFunction`), the MCP SDK's v2 server package, FastMCP,
+  Genkit, LlamaIndex, LangChain, Mastra and Anthropic, plus plain tool objects
+  in a `tools:` option in more forms, and provider tools. A collection of tools
+  that can't all be listed gets a warning instead of passing silently. A
+  library's prebuilt tool without a handler is unverifiable unless its
+  framework's type says it runs at the model provider, and a hosted tool's
+  callbacks are checked.
+- **Tools that read any file, table or environment variable the model names**
+  get a warning, like tools that send to any host.
+- **A secret could leave without PERM009** through a function that returns it,
+  through `exec`, through `eval`, or through code marked `@perm-unsafe`. All are
+  caught.
+
+### Changed
+
+- **New options:** `check --base <ref>` (fail when a change stops using the
+  base commit's lock) and `diff --summary <file>` (the uncut diff, for a job
+  summary).
+- **`init --workflow`** passes `--lock`, `--config`, `--adapter` and
+  `--unmapped` into the workflow, installs dependencies where the nearest
+  lockfile is, quotes names YAML would misread, and gives two folders that
+  would share a workflow file separate ones.
+- **Releases and CI** install dependencies without running their install
+  scripts. The job that publishes to npm installs nothing, only commits on
+  `main` are released, releases run one at a time, and `v0` only moves for the
+  newest release.
+- **The package** clears `dist/` before building and ships no source maps.
+- **Docs:** every behavior above is documented in the
+  [reference](docs/reference.md), and so is each remaining known limit,
+  including how to protect the PermLang workflow itself (a required status
+  check or a required workflow).
+
 ## 0.3.3 (2026-10-05)
 
 Fixes to `permlang init`. If you generated a workflow for a **pnpm or Yarn**

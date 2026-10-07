@@ -34,6 +34,12 @@ export interface Unit {
    * analyze, so it's unverifiable. Calls reach it, but it isn't reported or locked itself.
    */
   declarationOnly?: true;
+  /**
+   * For an anonymous function a call can reach through its type (dispatch.ts): the unit
+   * whose code it is. It stands for the part of that unit inside it, and isn't reported
+   * or locked itself.
+   */
+  around?: Unit;
 }
 
 export function isAnnotated(unit: Unit): boolean {
@@ -168,8 +174,12 @@ export function unitNodeForDeclaration(d: Node): Node | undefined {
   return undefined;
 }
 
+const inNodeModules = new WeakMap<SourceFile, boolean>();
+
 export function isInNodeModules(sf: SourceFile): boolean {
-  return sf.getFilePath().split("/").includes("node_modules");
+  let known = inNodeModules.get(sf);
+  if (known === undefined) inNodeModules.set(sf, (known = sf.getFilePath().split("/").includes("node_modules")));
+  return known;
 }
 
 // --- JavaScript declared in the project's own .d.ts files -------------------
@@ -215,27 +225,108 @@ export function createDeclaredUnit(node: Node): Unit {
   };
 }
 
+// --- anonymous functions reached through their type ---------------------------
+
 /**
- * Whether a .d.ts describes the project's own code rather than a dependency: its nearest
- * package.json is also the nearest one for some file being checked. A generated client in
- * a folder with its own package.json (Prisma's custom output), or another workspace
- * package's build output, is a dependency.
+ * A unit for an anonymous function that a call reaches through its type, such as a function
+ * kept in a Map (dispatch.ts). Its code belongs to the unit around it, which is charged with
+ * it as before; this one has that unit's uses inside the function (check.ts adds its calls).
+ * A @perm-unsafe on the unit around it covers it too.
  */
-export function ownDeclarationFiles(sourceFiles: readonly SourceFile[]): (declarationFile: SourceFile) => boolean {
-  const roots = new Map<string, string>();
-  const project = sourceFiles[0]?.getProject();
-  const rootOf = (dir: string): string => {
-    const known = roots.get(dir);
+export function createAnonymousUnit(fn: Node, around: Unit): Unit {
+  const sourceFile = fn.getSourceFile();
+  const { line } = lineAndColumn(sourceFile, fn.getStart());
+  const inside = isInside(fn);
+  return {
+    node: fn,
+    file: around.file,
+    name: `<function at ${sourceFile.getBaseName()}:${line}>`,
+    line,
+    exported: false,
+    own: around.own,
+    module: around.module,
+    uses: around.uses.filter(inside),
+    around,
+  };
+}
+
+/** Whether a position (a use's, or a call's) is inside `node`. */
+export function isInside(node: Node): (position: { line: number; column: number }) => boolean {
+  const sourceFile = node.getSourceFile();
+  const start = lineAndColumn(sourceFile, node.getStart());
+  const end = lineAndColumn(sourceFile, node.getEnd());
+  const after = (p: { line: number; column: number }, q: { line: number; column: number }) => p.line > q.line || (p.line === q.line && p.column >= q.column);
+  return (p) => after(p, start) && !after(p, end);
+}
+
+/**
+ * The packages a project's files belong to: each file's is the folder of its nearest
+ * package.json. The project's own packages are those of the files being checked. A .d.ts
+ * in one of them describes the project's own JavaScript. A .d.ts in another folder outside
+ * node_modules (a client generated into a folder with its own package.json, as Prisma's
+ * custom output is, or a workspace package reached through a link) describes a package.
+ */
+export class PackageFolders {
+  private readonly roots = new Map<string, string>();
+  private readonly names = new Map<string, string>();
+  private readonly own: ReadonlySet<string>;
+
+  constructor(sourceFiles: readonly SourceFile[]) {
+    this.own = new Set(sourceFiles.map((sf) => this.rootOf(sf, sf.getDirectoryPath())));
+  }
+
+  /** Whether a .d.ts describes the project's own code: its package is one of the files being checked. */
+  isOwn(declarationFile: SourceFile): boolean {
+    return this.own.has(this.rootOf(declarationFile, declarationFile.getDirectoryPath()));
+  }
+
+  /**
+   * The package a declaration in a .d.ts outside node_modules and the project's own packages
+   * belongs to, and its folder. It's named by its package.json, or else by its folder
+   * (`./src/gen`, from the project's package). Undefined for anything else.
+   */
+  localPackage(declaration: Node): { name: string; folder: string } | undefined {
+    const file = declaration.getSourceFile();
+    if (!file.isDeclarationFile() || isInNodeModules(file) || this.isOwn(file)) return undefined;
+    const root = this.rootOf(file, file.getDirectoryPath());
+    const folder = root === "" ? file.getDirectoryPath() : root;
+    let name = this.names.get(folder);
+    if (name === undefined) {
+      name = (root !== "" && packageJsonName(file, root)) || this.folderName(folder);
+      this.names.set(folder, name);
+    }
+    return { name, folder };
+  }
+
+  /** The folder of the nearest package.json at or above `dir`; "" if there's none. */
+  private rootOf(file: SourceFile, dir: string): string {
+    const known = this.roots.get(dir);
     if (known !== undefined) return known;
     // ts-morph paths use `/`, with a drive letter on Windows: C:/app/src → C:/app → C:.
     const slash = dir.lastIndexOf("/");
     const parent = slash > 0 ? dir.slice(0, slash) : undefined;
-    const root = project?.getFileSystem().fileExistsSync(`${dir}/package.json`) ? dir : parent === undefined ? "" : rootOf(parent);
-    roots.set(dir, root);
+    const root = file.getProject().getFileSystem().fileExistsSync(`${dir}/package.json`) ? dir : parent === undefined ? "" : this.rootOf(file, parent);
+    this.roots.set(dir, root);
     return root;
-  };
-  const own = new Set(sourceFiles.map((sf) => rootOf(sf.getDirectoryPath())));
-  return (declarationFile) => own.has(rootOf(declarationFile.getDirectoryPath()));
+  }
+
+  /** A folder relative to the project's package that holds it (the innermost), else as it is. */
+  private folderName(folder: string): string {
+    const holders = [...this.own].filter((root) => root !== "" && folder.startsWith(`${root}/`));
+    const holder = holders.sort((a, b) => b.length - a.length)[0];
+    return holder === undefined ? folder : `./${folder.slice(holder.length + 1)}`;
+  }
+}
+
+/** The `name` in a folder's package.json, if it has one. */
+function packageJsonName(file: SourceFile, folder: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(file.getProject().getFileSystem().readFileSync(`${folder}/package.json`));
+    const name = typeof parsed === "object" && parsed !== null ? (parsed as { name?: unknown }).name : undefined;
+    return typeof name === "string" && name.trim() !== "" ? name : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // --- names, comments, exports ------------------------------------------------

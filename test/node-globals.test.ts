@@ -120,6 +120,14 @@ describe("import.meta.env", () => {
       "export function whole() { return { ...import.meta.env }; }",
       "/** @perm env(VITE_API_URL) */",
       "export function alias() { const env = import.meta.env; return env.VITE_TOKEN; }",
+      "/** @perm env(VITE_API_URL) */",
+      "export function metaAlias() { const m = import.meta; return m.env.VITE_TOKEN; }",
+      "/** @perm env(VITE_API_URL) */",
+      "export function metaBracket() { return import.meta[\"env\"].VITE_TOKEN; }",
+      "/** @perm env(VITE_API_URL) */",
+      "export function metaDestructured() { const { env } = import.meta; return env.VITE_TOKEN; }",
+      "/** @perm env(VITE_API_URL) */",
+      "export function metaNested() { const { env: { VITE_TOKEN, MODE } } = import.meta; return [VITE_TOKEN, MODE]; }",
     ].join("\n"),
   };
   // What vite/client declares.
@@ -144,8 +152,59 @@ describe("import.meta.env", () => {
       it("follows an alias, or reads every variable through one it can't follow", () => {
         expect(errors(report, "alias")).toEqual([name === "without types" ? "PERM001 env" : "PERM001 env(VITE_TOKEN)"]);
       });
+
+      it("reads through an alias of import.meta, a quoted `env`, and destructuring", () => {
+        for (const fn of ["metaAlias", "metaBracket", "metaDestructured", "metaNested"]) expect(errors(report, fn), fn).toEqual(["PERM001 env(VITE_TOKEN)"]);
+      });
     });
   }
+});
+
+describe("process without Node's types, reached another way", () => {
+  const report = check({ lib: ["ES2022"], types: [] }, {
+    "app.ts": [
+      "/** @perm env(A) */",
+      "export function viaGlobal() { return globalThis.process.env.B; }",
+      "/** @perm env(A) */",
+      "export function destructured() { const { env } = process; return env.C; }",
+      "/** @perm env(A) */",
+      "export function aliased() { const p = process; return p.env.D; }",
+      "/** @perm env(A) */",
+      "export function bracket() { return process[\"env\"].E; }",
+      "/** @perm env(A) */",
+      "export function renamed() { const { env: e } = globalThis.process; return [e.F, e]; }",
+      "/** @perm env(A) */",
+      "export function nested() { const { env: { G } } = process; return G; }",
+      "/** @perm env(A) */",
+      "export function lookalikes(o: { env: { H: string } }) { const { env } = o; const local = { env: { I: \"1\" } }; return [env.H, local.env.I]; }",
+      "/** @perm env(A) */",
+      "export function parameter({ env } = process) { return env.J; }",
+      "/** @perm env(A) */",
+      "export function nestedGlobal() { const { process: { env } } = globalThis; return env.K; }",
+      "/** @perm env(A) */",
+      "export function moreLookalikes({ env: given }: { env: { L: string } }) { const { env: own } = globalThis; const { other: { env: theirs } } = globalThis; const holder = { process: { env: { M: \"1\" } } }; const { process: { env: held } } = holder; const [{ env: listed }] = [{ env: { Q: \"1\" } }]; return [given.L, own.N, theirs.O, holder.process.env.M, held.P, listed.Q, undeclared.env.R]; }",
+    ].join("\n"),
+  });
+  const sorted = (fn: string) => errors(report, fn).sort();
+
+  it("reads variables by name", () => {
+    expect(sorted("viaGlobal")).toEqual(["PERM001 env(B)"]);
+    expect(sorted("destructured")).toEqual(["PERM001 env(C)"]);
+    expect(sorted("aliased")).toEqual(["PERM001 env(D)"]);
+    expect(sorted("bracket")).toEqual(["PERM001 env(E)"]);
+    expect(sorted("renamed")).toEqual(["PERM001 env", "PERM001 env(F)"]);
+    expect(sorted("nested")).toEqual(["PERM001 env(G)"]);
+    expect(sorted("parameter")).toEqual(["PERM001 env(J)"]);
+    expect(sorted("nestedGlobal")).toEqual(["PERM001 env(K)"]);
+    expect(sorted("lookalikes")).toEqual([]);
+    // A parameter given from outside, `globalThis.env`, another global member, a local object's `process`,
+    // an array's element, and a name nothing declares.
+    expect(sorted("moreLookalikes")).toEqual([]);
+  });
+
+  it("warns that the rest of process can't be checked, at globalThis.process too", () => {
+    expect(report.diagnostics.filter((d) => d.code === "PERM007").map((d) => `${d.capability} ${path.basename(d.file)}:${d.line}`)).toEqual(["node:process app.ts:2"]);
+  });
 });
 
 describe("web workers", () => {
@@ -155,11 +214,85 @@ describe("web workers", () => {
       "export function load() { importScripts(\"https://cdn.example/lib.js\"); }",
       "/** @perm net(cdn.example) */",
       "export function get() { return self.fetch(\"https://cdn.example/data.json\"); }",
+      "/** @perm net(cdn.example) */",
+      "export function loadSelf() { self.importScripts(\"https://cdn.example/lib.js\"); }",
+      "/** @perm net(cdn.example) */",
+      "export function loadAlias() { const i = self.importScripts; i(\"https://cdn.example/lib.js\"); }",
+      "/** @perm net(cdn.example) */",
+      "export function loadDestructured() { const { importScripts: i } = self; [\"https://cdn.example/lib.js\"].forEach(i); }",
+      "/** @perm net(cdn.example) */",
+      "export function register() { return navigator.serviceWorker.register(\"/sw.js\"); }",
     ].join("\n"),
   });
 
   it("treats importScripts as code it can't see", () => expect(errors(report, "load")).toEqual(["PERM004 unverifiable"]));
   it("still reads self.fetch's host", () => expect(errors(report, "get")).toEqual([]));
+  it("matches importScripts as the worker scope's method too", () => {
+    for (const fn of ["loadSelf", "loadAlias", "loadDestructured"]) expect(errors(report, fn), fn).toEqual(["PERM004 unverifiable"]);
+  });
+  it("treats registering a service worker as code it can't see", () => expect(errors(report, "register")).toEqual(["PERM004 unverifiable"]));
+});
+
+// Without Node's types, setTimeout is only the browser's, which evaluates a string handler.
+describe("browser timers, without Node's types", () => {
+  const report = check({ lib: ["ES2022", "DOM"], types: [] }, {
+    "timers.ts": [
+      "/** @perm env(MODE) */",
+      "export function forEachCode(codes: string[]) { codes.forEach(setTimeout); }",
+      "/** @perm env(MODE) */",
+      "export function thenCode(code: string) { return Promise.resolve(code).then(setTimeout); }",
+      "/** @perm env(MODE) */",
+      "export function reflectCode() { Reflect.apply(setTimeout, window, [\"alert(1)\"]); }",
+      "/** @perm env(MODE) */",
+      "export function stored() { return { later: setTimeout }; }",
+      "/** @perm env(MODE) */",
+      "export function handlerType(h: TimerHandler) { setTimeout(h, 0); }",
+      "/** @perm env(MODE) */",
+      "export function handlerAny(body: string) { setTimeout(JSON.parse(body).code, 0); }",
+      "/** @perm env(MODE) */",
+      "export function handlerUnknown(h: unknown) { setTimeout(h as TimerHandler, 0); }",
+      "/** @perm env(MODE) */",
+      "export function handlerUnion(h: string | (() => void)) { window.setTimeout(h, 0); }",
+      "/** @perm env(MODE) */",
+      "export function functions(h: () => void, f: Function) { setTimeout(h, 0); setTimeout(f, 0); [h].forEach(setTimeout); setTimeout.call(window, h, 1); Reflect.apply(setTimeout, window, [h, 1]); const schedule = window.setTimeout.bind(window); schedule(h, 2); setTimeout.bind(window, h, 3)(); return Promise.resolve(h).then(setInterval); }",
+      "/** @perm env(MODE) */",
+      "export function boundInPlace(codes: string[]) { codes.forEach(window.setTimeout.bind(window)); }",
+      "/** @perm env(MODE) */",
+      "export function boundStored(codes: string[]) { const later = window.setTimeout.bind(window); codes.forEach(later); }",
+      "/** @perm env(MODE) */",
+      "export function boundArgument() { const run = setTimeout.bind(window, \"alert(1)\"); run(); }",
+      "/** @perm env(MODE) */",
+      "export function bindMethod(wrap: (f: unknown) => void) { wrap(setTimeout.bind); return [window.setInterval.bind]; }",
+    ].join("\n"),
+  });
+
+  it("treats a timer that may be given a string as unverifiable", () => {
+    // `bindMethod` hands out the timer's own `bind`, which makes copies nothing checks the calls of.
+    for (const fn of ["forEachCode", "thenCode", "reflectCode", "stored", "handlerType", "handlerAny", "handlerUnknown", "handlerUnion", "boundInPlace", "boundStored", "boundArgument", "bindMethod"]) {
+      expect(errors(report, fn), fn).toEqual(["PERM004 unverifiable"]);
+    }
+  });
+  it("leaves timers given only functions alone", () => expect(errors(report, "functions")).toEqual([]));
+});
+
+// Browser APIs that load a script the checker can't see, like a Worker.
+describe("script loaders", () => {
+  const report = check({ lib: ["ES2022", "DOM"], types: [] }, {
+    "app.ts": [
+      "/** @perm env(MODE) */",
+      "export function worklet(ctx: AudioContext) { return ctx.audioWorklet.addModule(\"/w.js\"); }",
+      "/** @perm env(MODE) */",
+      "export function register() { return navigator.serviceWorker.register(\"/sw.js\"); }",
+      "/** @perm env(MODE) */",
+      "export function lookalikes() { const registry = { register: (x: string) => x, addModule: (x: string) => x }; return [registry.register(\"/sw.js\"), registry.addModule(\"/w.js\"), navigator.serviceWorker.getRegistrations()]; }",
+    ].join("\n"),
+  });
+
+  it("treats a worklet module and a service worker as unverifiable", () => {
+    expect(errors(report, "worklet")).toEqual(["PERM004 unverifiable"]);
+    expect(errors(report, "register")).toEqual(["PERM004 unverifiable"]);
+  });
+  it("leaves look-alikes alone", () => expect(errors(report, "lookalikes")).toEqual([]));
 });
 
 describe("a project's own declarations", () => {

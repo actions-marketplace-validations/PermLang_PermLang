@@ -7,6 +7,7 @@
     "Module.registerHooks": ["unverifiable"],
     "Module.runMain": ["unverifiable"],
     "Module.require": ["unverifiable"],
-    "Module.constructor": ["unverifiable"]
+    "Module.constructor": ["unverifiable"],
+    "Module.enableCompileCache": ["fs.read({arg:0})", "fs.write({arg:0})"]
   }
 }

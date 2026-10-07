@@ -8,6 +8,10 @@
     "jsonSchema": [],
     "zodSchema": [],
     "asSchema": [],
-    "generateId": []
+    "generateId": [],
+    "zodFunction": [],
+    "zodResponsesFunction": [],
+    "standardFunction": [],
+    "standardResponsesFunction": []
   }
 }

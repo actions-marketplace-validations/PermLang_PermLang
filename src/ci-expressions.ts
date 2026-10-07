@@ -84,6 +84,10 @@ interface Token {
   value?: string;
 }
 
+// Whitespace as .NET defines it, which is how the runner splits an expression: JavaScript's
+// `\s` leaves out U+0085, so `secrets<U+0085>.KEY` read as one word, and no secret.
+const SPACE = /[\s\u0085]/;
+
 /**
  * GitHub's lexer, simplified to what finding `secrets` needs: whitespace separates
  * tokens, strings are quoted (with '' for a quote), and anything else runs to the next
@@ -94,7 +98,7 @@ function tokenize(expression: string): Token[] {
   const out: Token[] = [];
   for (let i = 0; i < expression.length; ) {
     const c = expression[i]!;
-    if (/\s/.test(c)) {
+    if (SPACE.test(c)) {
       i++;
     } else if (c === "'" || c === '"') {
       let value = "";
@@ -111,7 +115,7 @@ function tokenize(expression: string): Token[] {
       i++;
     } else {
       let j = i + 1;
-      while (j < expression.length && !PUNCTUATION.includes(expression[j]!) && !/[\s'"]/.test(expression[j]!)) j++;
+      while (j < expression.length && !PUNCTUATION.includes(expression[j]!) && !SPACE.test(expression[j]!) && !`'"`.includes(expression[j]!)) j++;
       out.push({ kind: "word", text: expression.slice(i, j) });
       i = j;
     }

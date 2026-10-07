@@ -2,12 +2,24 @@
 
 import { Node, type CallExpression } from "ts-morph";
 import type { Capability } from "../capability.js";
-import { hostOf, isGlobalLibFunction } from "./shared.js";
+import { hostOf, isGlobalLibFunction, propertyValue, unwrapExpression } from "./shared.js";
 
 /** The capability of calling fetch with `args`; no args means fetch used as a value. */
 export function fetchCapability(args: readonly Node[]): Capability {
-  const host = hostOf(args[0]);
+  const host = redirects(args[1]) ? undefined : hostOf(args[0]);
   return host === undefined ? { name: "net", dynamic: true } : { name: "net", arg: host };
+}
+
+/**
+ * Whether a fetch's options could send the request somewhere other than its URL's host. Node's
+ * fetch takes a `dispatcher` (an undici Agent with its own DNS lookup or connection, say), so
+ * options that set one, may set one (a spread, a computed key), or aren't written out where
+ * they're used (a variable) do. Browsers ignore it, but the same code can run on Node.
+ */
+function redirects(written: Node | undefined): boolean {
+  const init = written && unwrapExpression(written);
+  if (!init || (Node.isIdentifier(init) && init.getText() === "undefined")) return false;
+  return !Node.isObjectLiteralExpression(init) || propertyValue(init, "dispatcher") !== "absent";
 }
 
 /** The global fetch from lib.dom or @types/node, however it was reached. */

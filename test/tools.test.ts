@@ -9,6 +9,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { checkTsConfig, type CheckOptions, type Report } from "../src/check.js";
 import { publishedPackages } from "./ai-packages.js";
+import { removeTemporary } from "./temporary.js";
 
 const typeRoots = [path.resolve("node_modules/@types")];
 
@@ -213,6 +214,23 @@ const first: any = second;
 const second: any = first;
 export const looped = tool({ name: "looped", description: "Loops", execute: first });
 export const loopedDefinition = tool(first);`,
+  // Found in re-verification: @perm-unsafe accepts code for annotations only. A model's input
+  // still reaches the eval and require behind it.
+  vouched: `import { tool } from "@openai/agents";
+/** @perm-unsafe reason:"template compiler, trusted templates only" */
+function render(t: string): unknown { return eval(t); }
+/** @perm-unsafe reason:"plugin loader" */
+function loadPlugin(p: string): unknown { return require(p); }
+export const templateTool = tool({ name: "tpl", description: "Render a template", execute: async ({ t }: { t: string }) => String(render(t)) });
+export const pluginTool = tool({ name: "plugin", description: "Load a plugin", execute: async ({ p }: { p: string }) => String(loadPlugin(p)) });`,
+  // A tool a factory made, given in a tools record: registered once, where it's made, even when
+  // its type is the definition's own.
+  madeThenListed: `import { generateText, tool } from "ai";
+import { execSync } from "node:child_process";
+const listed = tool({ description: "List files", execute: async () => execSync("ls").toString() });
+export async function ask(prompt: string) {
+  return generateText({ prompt, tools: { listed } });
+}`,
   // The schema is compared by symbol, so renaming the import doesn't hide the handler.
   renamedSchema: `import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema as CallTool, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -237,7 +255,7 @@ beforeAll(() => {
   for (const [name, code] of Object.entries(sources)) writeFileSync(path.join(dir, `${name}.ts`), code + "\n");
 }, 60_000);
 
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+afterAll(() => removeTemporary(dir));
 
 describe("tools given to AI models", () => {
   it("finds tool registrations across frameworks, with their names", () => {
@@ -266,13 +284,16 @@ describe("tools given to AI models", () => {
       "@openai/agents looped",
       "@openai/agents loopedDefinition",
       "@openai/agents made",
+      "@openai/agents plugin",
       "@openai/agents raw",
       "@openai/agents reassignable",
       "@openai/agents run",
       "@openai/agents spread",
       "@openai/agents tool",
+      "@openai/agents tpl",
       "@openai/agents untyped",
       "ai deleteUser",
+      "ai listed",
       "ai tool",
       "ai weather",
     ]);
@@ -318,6 +339,17 @@ describe("tools given to AI models", () => {
       loaded: "unverifiable",
       disguised: "unverifiable",
     });
+  });
+
+  it("follows a handler into code marked @perm-unsafe", () => {
+    expect(tool(run(), "tpl").reaches).toEqual(["unverifiable"]);
+    expect(tool(run(), "plugin").reaches).toEqual(["unverifiable"]);
+    // The functions that register them aren't failed for it: @perm-unsafe still vouches for that.
+    expect(run({ strictness: "development" }).diagnostics.filter((d) => d.file.endsWith("vouched.ts") && d.code === "PERM004")).toEqual([]);
+  });
+
+  it("registers a tool a factory made once, where it's made, when it's given in a collection", () => {
+    expect(run().tools.filter((t) => t.file.endsWith("madeThenListed.ts")).map((t) => `${t.name} ${t.line}: ${t.reaches.join(", ")}`)).toEqual(["listed 3: exec"]);
   });
 
   it("doesn't loop on constants that refer to each other", () => {
@@ -370,6 +402,7 @@ describe("tools given to AI models", () => {
       "warning loops.ts:4 looped",
       "warning loops.ts:5 loopedDefinition",
       "warning lowlevel.ts:5 *",
+      "warning madeThenListed.ts:3 listed",
       "warning mcp.ts:5 save_note",
       "warning mcpSchemaRun.ts:5 run_command",
       "warning mcpSchemaRun.ts:6 read_file",
@@ -386,6 +419,8 @@ describe("tools given to AI models", () => {
       "warning unfollowable.ts:8 declared",
       "warning unfollowable.ts:9 reassignable",
       "warning vercel.ts:4 deleteUser",
+      "warning vouched.ts:6 tpl",
+      "warning vouched.ts:7 plugin",
     ]);
     const shell = warnings.find((d) => d.capability === "shell")!;
     expect(shell.message).toBe("tool shell (@langchain/core) can be called by an AI model, and reaches exec.");
@@ -410,11 +445,11 @@ describe("tools given to AI models", () => {
     expect(run({ strictness: "development", tools: "error" }).diagnostics.filter((d) => d.code === "PERM008").every((d) => d.severity === "error")).toBe(true);
     // "error" is asked for explicitly, so it fails at sketch too; the default stays a warning.
     const atSketch = (tools?: "error") => run({ strictness: "sketch", ...(tools ? { tools } : {}) }).diagnostics.filter((d) => d.code === "PERM008").map((d) => d.severity);
-    expect(atSketch("error")).toEqual(Array(29).fill("error"));
-    expect(atSketch()).toEqual(Array(29).fill("warning"));
+    expect(atSketch("error")).toEqual(Array(32).fill("error"));
+    expect(atSketch()).toEqual(Array(32).fill("warning"));
     expect(run({ tools: "trust" }).diagnostics.filter((d) => d.code === "PERM008")).toEqual([]);
     // The tools are still listed.
-    expect(run({ tools: "trust" }).tools).toHaveLength(33);
+    expect(run({ tools: "trust" }).tools).toHaveLength(36);
   });
 
   it("counts an MCP client's connection as network access, and a server talking to its client as none", () => {
@@ -425,6 +460,164 @@ describe("tools given to AI models", () => {
 
   it("still charges the code that registers a tool with what the tool reaches", () => {
     expect(run().functions.find((f) => f.name === "start")!.actual).toContain("fs.write");
+  });
+});
+
+// What a tools collection can hold, written every way PermLang tells apart. The stand-ins'
+// generateText takes any object, so each form type-checks.
+describe("entries of a tools collection", () => {
+  const source = `import { generateText, tool } from "ai";
+import { DynamicStructuredTool } from "@langchain/core/tools";
+import { execSync } from "node:child_process";
+type Definition = { description: string; execute: () => string };
+type Listed = { name: string; invoke: () => Promise<string> };
+function runCommand() {
+  return execSync("make").toString();
+}
+declare function handlerKey(): string;
+declare function declaredDefinition(): Definition;
+declare const untyped: any;
+class MyTool extends DynamicStructuredTool {}
+class CommandRunner {
+  execute() {
+    return execSync("make").toString();
+  }
+}
+const concise = () => ({ description: "concise", execute: () => execSync("ls").toString() });
+const helpers = {
+  make() {
+    return { description: "method", execute: () => execSync("ls").toString() };
+  },
+};
+const expression = function () {
+  return { description: "expression", execute: () => execSync("ls").toString() };
+};
+function nothing(): void {
+  return;
+}
+function either(flag: boolean): Definition | { description: string; run: () => string } {
+  return flag ? { description: "a", execute: () => "" } : { description: "b", run: () => "" };
+}
+function tagged(): Definition & { tag: string } {
+  return { description: "tagged", execute: () => "", tag: "t" };
+}
+function shellFrom() {
+  return { name: "shell", shell: { run: async () => "" } };
+}
+const loopA: any = loopB;
+const loopB: any = loopA;
+export async function ask(prompt: string, mine: MyTool, theirs: DynamicStructuredTool) {
+  return generateText({
+    prompt,
+    tools: [
+      runCommand,
+      async () => execSync("pwd").toString(),
+      ,
+      new MyTool({ name: "mine", description: "Mine", schema: {}, func: async () => "" }),
+      mine,
+      theirs,
+      nothing(),
+      declaredDefinition(),
+      concise(),
+      helpers.make(),
+      expression(),
+      either(true),
+      tagged(),
+      shellFrom(),
+      loopA,
+      untyped.build(),
+      new CommandRunner(),
+    ],
+  });
+}
+export const fnTools = generateText({ prompt: "hi", tools: runCommand });
+export async function askRecord(prompt: string) {
+  return generateText({
+    prompt,
+    tools: {
+      computed: { description: "Computed handler key", [handlerKey()]: async () => execSync("ls").toString() },
+      schema: { description: "Not a handler", [handlerKey()]: "settings" },
+    },
+  });
+}
+const spreadA: any = { ...spreadB };
+const spreadB: any = { ...spreadA };
+export const loopedSpread = tool({ ...spreadA, name: "loopedSpread" });
+const optionsA: any = { ...optionsB };
+const optionsB: any = { ...optionsA };
+export const loopedOptions = generateText({ ...optionsA, prompt: "hi" });
+const bracketed: Record<string, any> = {};
+bracketed["named"] = { description: "Named", execute: async () => execSync("ls").toString() };
+bracketed[handlerKey()] = { description: "Unnamed", execute: async () => execSync("pwd").toString() };
+bracketed.named.execute = runCommand;
+void bracketed.named;
+bracketed.named.execute();
+export const bracketedTools = generateText({ prompt: "hi", tools: bracketed });
+const more: Listed[] = [];
+const extra: Listed[] = [{ name: "extra", invoke: async () => execSync("ls").toString() }];
+more.push(...extra);
+more.splice(0, 0, { name: "spliced", invoke: async () => "" });
+more.includes(extra[0]!);
+export const moreTools = generateText({ prompt: "hi", tools: more });
+`;
+  let report: Report;
+  const listed = () => report.tools.map((t) => `${t.name} ${t.line}: ${t.reaches.join(", ") || "nothing"}`);
+
+  beforeAll(() => {
+    const project = mkdtempSync(path.join(tmpdir(), "permlang-tools-entries-"));
+    writeFileSync(
+      path.join(project, "tsconfig.json"),
+      JSON.stringify({ compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext", strict: true, types: ["node"], typeRoots }, include: ["*.ts"] }),
+    );
+    writeFileSync(path.join(project, "frameworks.d.ts"), frameworks);
+    writeFileSync(path.join(project, "edges.ts"), source);
+    report = checkTsConfig(path.join(project, "tsconfig.json"), { strictness: "sketch" });
+    removeTemporary(project);
+  }, 60_000);
+
+  it("follows a function given as the tool, and skips holes and tools made or typed by the framework", () => {
+    // Named by the function, else "tool".
+    expect(listed()).toContain("runCommand 45: exec");
+    expect(listed()).toContain("tool 46: exec");
+    // A hole; your subclass of the framework's tool class, registered once where it's made; a
+    // value typed as it, or as the framework's own class; a function that returns nothing.
+    expect(listed()).toContain("MyTool 48: nothing");
+    expect(listed().filter((t) => / (47|49|50|51):/.test(t))).toEqual([]);
+  });
+
+  it("can't follow a plain object a helper of yours builds, or a value it can't see", () => {
+    // A declared function, an arrow function, a method, a function expression; a union, an
+    // intersection, a built-in tool's object; constants in a loop; any; your own class.
+    for (const line of [52, 53, 54, 55, 56, 57, 58, 59, 60, 61]) expect(listed()).toContain(`* ${line}: unverifiable`);
+  });
+
+  it("reads a handler under a computed key, and skips a schema under one", () => {
+    expect(listed()).toContain("computed 70: exec");
+    expect(listed().filter((t) => t.includes(" 71:"))).toEqual([]);
+  });
+
+  it("stops in loops of spreads, and reports what it can't list", () => {
+    // A definition spread from constants that spread each other: no handler to follow.
+    expect(listed()).toContain("loopedSpread 77: unverifiable");
+    // Options spread from constants that spread each other could set any tools.
+    expect(listed()).toContain("* 79: unverifiable");
+    // A function given as the whole collection.
+    expect(listed()).toContain("* 65: unverifiable");
+  });
+
+  it("follows what's added to a constant collection later, and reports changes it can't list", () => {
+    // `tools["named"] = ...`, and a computed key, named by the definition, else "tool".
+    expect(listed()).toContain("named 82: exec");
+    expect(listed()).toContain("tool 83: exec");
+    // Changing an entry (`tools.named.execute = ...`); reading or calling one changes nothing.
+    expect(listed()).toContain("* 84: unverifiable");
+    expect(listed().filter((t) => / (85|86):/.test(t))).toEqual([]);
+    // `push(...more)` is listed; `splice` can't be; `includes` changes nothing.
+    expect(listed()).toContain("extra 89: exec");
+    expect(listed()).toContain("* 91: unverifiable");
+    expect(listed().filter((t) => t.includes(" 92:"))).toEqual([]);
+    // Nothing else.
+    expect(listed()).toHaveLength(22);
   });
 });
 
@@ -549,6 +742,184 @@ export const remote = computerTool({ computer: async (): Promise<Computer> => co
 export const legacy = computerTool({ computer: () => connect() });
 // Searches files stored at OpenAI.
 export const files = fileSearchTool("vs_123");`,
+    // Found in re-verification: a hosted tool runs at OpenAI, but callbacks it's given run here.
+    hosted: `import { hostedMcpTool, webSearchTool } from "@openai/agents";
+import { execSync } from "node:child_process";
+export const approved = hostedMcpTool({
+  serverLabel: "docs",
+  serverUrl: "https://mcp.example",
+  requireApproval: "always",
+  onApproval: async (_context, item) => {
+    execSync("notify-send " + item.toolName);
+    return { approve: true };
+  },
+});
+async function approveAll() {
+  return { approve: true };
+}
+export const byName = hostedMcpTool({ serverLabel: "docs", requireApproval: "always", onApproval: approveAll });
+export const noCallback = hostedMcpTool({ serverLabel: "docs", requireApproval: "never" });
+// Options from elsewhere could carry a callback; a web search's can't.
+declare const config: Parameters<typeof hostedMcpTool>[0];
+export const fromConfig = hostedMcpTool(config);
+export function search(options: Parameters<typeof webSearchTool>[0]) {
+  return webSearchTool(options);
+}
+// A callback in options spread in from a constant; options parsed at run time.
+const approval = {
+  requireApproval: "always" as const,
+  onApproval: async () => {
+    execSync("notify-send approval");
+    return { approve: true };
+  },
+};
+export const spreadApproval = hostedMcpTool({ serverLabel: "docs", ...approval });
+export const parsedConfig = hostedMcpTool(JSON.parse("{}"));`,
+    // Found in re-verification: frameworks that weren't recognized. OpenAI's SDK runs the
+    // functions given to chat.completions.runTools; its other calls only send schemas.
+    openai: `import OpenAI from "openai";
+import { zodFunction } from "openai/helpers/zod";
+import { ParsingToolFunction } from "openai/lib/RunnableFunction";
+import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+declare const pathSchema: { parse(input: unknown): { path: string } };
+const client = new OpenAI();
+export async function inline() {
+  return client.chat.completions.runTools({
+    model: "gpt-x",
+    messages: [],
+    tools: [{ type: "function", function: { name: "oa_shell", description: "Run a command", parameters: {}, parse: JSON.parse, function: (a: { cmd: string }) => execSync(a.cmd).toString() } }],
+  }).finalContent();
+}
+const readTool = zodFunction({ name: "read_file", parameters: pathSchema, function: ({ path }) => readFileSync(path, "utf8") });
+export async function withZod() {
+  return client.chat.completions.runTools({ model: "gpt-x", messages: [], tools: [readTool] }).finalContent();
+}
+// Making a tool sends nothing to OpenAI: running the model does.
+export function makeListTool() {
+  return zodFunction({ name: "list_files", parameters: pathSchema, function: ({ path }) => readFileSync(path, "utf8") });
+}
+export const parsing = new ParsingToolFunction({ name: "parsed", description: "Run", parameters: {}, parse: JSON.parse, function: (a: { cmd: string }) => execSync(a.cmd).toString() });
+export async function schemaOnly() {
+  return client.chat.completions.create({ model: "gpt-x", messages: [], tools: [{ type: "function", function: { name: "weather", parameters: {} } }] });
+}
+type CreateTools = Parameters<typeof client.chat.completions.create>[0]["tools"];
+export async function schemaPassedIn(tools: CreateTools) {
+  return client.chat.completions.create({ model: "gpt-x", messages: [], tools });
+}
+export async function paramsPassedIn(params: Parameters<typeof client.chat.completions.create>[0]) {
+  return client.chat.completions.create(params);
+}
+function schemaOf(name: string) {
+  return { type: "function" as const, function: { name, parameters: {} } };
+}
+export async function schemaFromHelper() {
+  return client.chat.completions.create({ model: "gpt-x", messages: [], tools: [schemaOf("weather")] });
+}
+export async function responses() {
+  return client.responses.create({ model: "gpt-x", input: "hi", tools: [{ type: "function", name: "weather", parameters: {}, strict: true }, { type: "web_search" }] });
+}
+// A runTools tool a helper of yours builds: it can't be followed.
+function runnable(cmd: string) {
+  return { type: "function" as const, function: { name: cmd, description: cmd, parameters: {}, function: () => execSync(cmd).toString() } };
+}
+export async function withHelper() {
+  return client.chat.completions.runTools({ model: "gpt-x", messages: [], tools: [runnable("ls")] }).finalContent();
+}
+// A session turn of the beta Agents API runs the handlers in toolHandlers.
+function runShell(args: Record<string, unknown>) {
+  return { output: execSync(String(args.cmd)).toString() };
+}
+export function agentTurn(sessionID: string) {
+  return client.beta.agents.sessions.stream(sessionID, { input: "hi", toolHandlers: { lookup: async (args) => ({ text: readFileSync(String(args.path), "utf8") }), shell: runShell } });
+}
+export function agentTurnWith(sessionID: string, handlers: Record<string, (args: Record<string, unknown>) => object>) {
+  return client.beta.agents.sessions.stream(sessionID, { input: "hi", toolHandlers: handlers });
+}`,
+    fastmcp: `import { FastMCP } from "fastmcp";
+import { execSync } from "node:child_process";
+const server = new FastMCP({ name: "ops", version: "1.0.0" });
+server.addTool({ name: "fm_shell", execute: async ({ cmd }: { cmd: string }) => execSync(cmd).toString() });
+server.addTools([{ name: "fm_list", execute: async () => execSync("ls").toString() }]);`,
+    genkit: `import { dynamicTool, genkit, tool } from "genkit";
+import { execSync } from "node:child_process";
+const ai = genkit({});
+export const gk = ai.defineTool({ name: "gk_shell", description: "Run a command" }, async ({ cmd }: { cmd: string }) => execSync(cmd).toString());
+export const gkDynamic = ai.dynamicTool({ name: "gk_dynamic", description: "List files" }, async () => execSync("ls").toString());
+export const gkTool = tool({ name: "gk_tool", description: "Run a command" }, async ({ cmd }: { cmd: string }) => execSync(cmd).toString());
+// No function: the app answers the model itself, wherever it does.
+export const gkAsk = dynamicTool({ name: "gk_ask", description: "Ask the user" });
+// Tools given by value or by name are registered where they're defined.
+export async function ask(prompt: string) {
+  return ai.generate({ prompt, tools: [gk, "gk_tool"] });
+}
+// A list of names, passed in: names can't be a tool that runs.
+export async function askByName(prompt: string, names: string[]) {
+  return ai.generate({ prompt, tools: names });
+}`,
+    // Found in re-verification: plain-object tools given in forms that were missed. Collections
+    // that can't be listed could hold any tool.
+    collections: `import { ToolLoopAgent, generateText, tool } from "ai";
+import { Agent, type FunctionTool } from "@openai/agents";
+import { execSync } from "node:child_process";
+export async function quoted(prompt: string) {
+  return generateText({ prompt, tools: { sh: { description: "Run", inputSchema: {}, "execute": async ({ cmd }: { cmd: string }) => execSync(cmd).toString() } } });
+}
+const K = "execute";
+export async function computed(prompt: string) {
+  return generateText({ prompt, tools: { cs: { description: "Run", inputSchema: {}, [K]: async ({ cmd }: { cmd: string }) => execSync(cmd).toString() } } });
+}
+export const quotedTool = tool({ description: "Run", inputSchema: {}, "execute": async ({ cmd }: { cmd: string }) => execSync(cmd).toString() } as any);
+const filled: Record<string, any> = {};
+filled.later = { description: "Run", inputSchema: {}, execute: async ({ cmd }: { cmd: string }) => execSync(cmd).toString() };
+export const filledAgent = new ToolLoopAgent({ tools: filled });
+const options = { tools: { spreadIn: { description: "Run", inputSchema: {}, execute: async ({ cmd }: { cmd: string }) => execSync(cmd).toString() } } };
+export async function spreadOptions(prompt: string) {
+  return generateText({ ...options, prompt });
+}
+const onlySpread: FunctionTool[] = [{ type: "function", name: "spreadList", invoke: async (input: string) => execSync(input).toString() } as any];
+export const spreadAgent = new Agent({ name: "s", tools: [...onlySpread] });
+const names = ["ls", "pwd"];
+export const fromEntries = new ToolLoopAgent({ tools: Object.fromEntries(names.map((n) => [n, { description: n, inputSchema: {}, execute: async () => execSync(n).toString() }])) });
+function shellDefinition(cmd: string) {
+  return { description: cmd, inputSchema: {}, execute: async () => execSync(cmd).toString() };
+}
+export async function fromHelper(prompt: string) {
+  return generateText({ prompt, tools: { helped: shellDefinition("ls") } });
+}
+function baseTools() {
+  return { base: shellDefinition("ls") };
+}
+export async function spreadCall(prompt: string) {
+  return generateText({ prompt, tools: { ...baseTools() } });
+}
+let reassignable = { mutable: shellDefinition("ls") };
+export async function fromLet(prompt: string) {
+  return generateText({ prompt, tools: reassignable });
+}
+export async function optionsPassedIn(options: Parameters<typeof generateText>[0]) {
+  return generateText({ ...options, prompt: "hi" });
+}
+// A helper that returns a framework's tool: the tool is registered where it's made.
+function makeTool(cmd: string) {
+  return tool({ description: cmd, inputSchema: {}, execute: async () => execSync(cmd).toString() });
+}
+export async function viaFactory(prompt: string) {
+  return generateText({ prompt, tools: { made: makeTool("ls") } });
+}
+// Changed after it's created: by Object.assign (can't be listed), and push (can).
+const merged: Record<string, any> = {};
+Object.assign(merged, baseTools());
+export const mergedAgent = new ToolLoopAgent({ tools: merged });
+const list: any[] = [];
+list.push({ name: "pushed", invoke: async () => execSync("ls").toString() });
+export const listAgent = new Agent({ name: "l", tools: list });
+// Calling an entry changes nothing.
+const used = { safe: { description: "The time", inputSchema: {}, execute: async () => Date.now() } };
+export const usedAgent = new ToolLoopAgent({ tools: used });
+export async function callDirectly() {
+  return used.safe.execute();
+}`,
     // A library's prebuilt tool runs code PermLang can't see.
     prebuilt: `import { Calculator } from "@langchain/community/tools/calculator";
 export const calculator = new Calculator();`,
@@ -580,7 +951,20 @@ const GrepTool = class extends StructuredTool {
     return "ok";
   }
 };
-export const tools = [new ShellTool(), new NotesTool(), new GrepTool()];`,
+// Found in re-verification: what runs is any method the framework calls, not only _call.
+class InvokeOverride extends StructuredTool {
+  name = "inv";
+  description = "Overrides invoke";
+  schema = {};
+  protected async _call() {
+    return "ok";
+  }
+  override async invoke(input: unknown) {
+    writeFileSync("/etc/x", String(input));
+    return "done";
+  }
+}
+export const tools = [new ShellTool(), new NotesTool(), new GrepTool(), new InvokeOverride()];`,
     // Tools option forms: spreads, a shorthand, a list, and a record passed in from elsewhere.
     options: `import { generateText, tool, type ToolSet } from "ai";
 import Anthropic from "@anthropic-ai/sdk";
@@ -651,7 +1035,7 @@ export default class Anthropic {
     for (const [name, code] of Object.entries(sources)) writeFileSync(path.join(project, `${name}.ts`), code + "\n");
   }, 60_000);
 
-  afterAll(() => rmSync(project, { recursive: true, force: true }));
+  afterAll(() => removeTemporary(project));
 
   it("finds OpenAI Agents tools through @openai/agents' re-exports, including built-in tools that run here", () => {
     expect(reaches(check(), "agents")).toEqual({
@@ -688,7 +1072,71 @@ export default class Anthropic {
 
   it("follows your own LangChain tool classes to what they run", () => {
     // Named by their name field, else by the class.
-    expect(reaches(check(), "langchain")).toEqual({ shell: "exec", NotesTool: "fs.write(./notes.md)", grep: "exec" });
+    expect(reaches(check(), "langchain")).toEqual({ shell: "exec", NotesTool: "fs.write(./notes.md)", grep: "exec", inv: "fs.write(/etc/x)" });
+  });
+
+  it("follows the callbacks given to a tool that runs at the provider", () => {
+    expect(reaches(check(), "hosted")).toEqual({
+      approved: "exec",
+      byName: "nothing",
+      noCallback: "nothing",
+      fromConfig: "unverifiable",
+      tool: "nothing",
+      // A callback spread in from a constant; options parsed at run time, which could hold one.
+      spreadApproval: "exec",
+      parsedConfig: "unverifiable",
+    });
+  });
+
+  it("finds the OpenAI SDK's tools that runTools runs, and not schemas its other calls send", () => {
+    expect(reaches(check(), "openai")).toEqual({
+      oa_shell: "exec",
+      read_file: "fs.read",
+      list_files: "fs.read",
+      parsed: "exec",
+      // The beta Agents API's toolHandlers: written in the call, and a record passed in.
+      lookup: "fs.read",
+      shell: "exec",
+      "*": "unverifiable",
+    });
+    // A runTools tool built by a helper of yours, and the record of handlers passed in.
+    expect(check().tools.filter((t) => t.file.endsWith("openai.ts") && t.name === "*").map((t) => t.line)).toEqual([48, 58]);
+    // The helpers that make a tool only build an object, as the AI SDK's tool() does.
+    expect(check().functions.find((f) => f.name === "makeListTool")!.actual).toEqual(["fs.read"]);
+  });
+
+  it("finds FastMCP's and Genkit's tools", () => {
+    expect(reaches(check(), "fastmcp")).toEqual({ fm_shell: "exec", fm_list: "exec" });
+    expect(reaches(check(), "genkit")).toEqual({ gk_shell: "exec", gk_dynamic: "exec", gk_tool: "exec", gk_ask: "unverifiable" });
+    expect(check().tools.filter((t) => t.file.endsWith("genkit.ts")).map((t) => t.framework)).toEqual(Array(4).fill("genkit"));
+  });
+
+  it("lists plain-object tools however they're given, and reports collections it can't list", () => {
+    const inFile = check().tools.filter((t) => t.file.endsWith("collections.ts")).map((t) => `${t.name} ${t.line}: ${t.reaches.join(", ") || "nothing"}`);
+    expect(inFile.sort()).toEqual([
+      // Object.fromEntries(...), { ...baseTools() }, a let, and options passed in.
+      "* 22: unverifiable",
+      "* 33: unverifiable",
+      "* 37: unverifiable",
+      "* 40: unverifiable",
+      // Object.assign(merged, ...).
+      "* 51: unverifiable",
+      "cs 9: exec",
+      "helped 27: unverifiable",
+      "later 13: exec",
+      "pushed 54: exec",
+      "quotedTool 11: exec",
+      "safe 57: nothing",
+      "sh 5: exec",
+      "spreadIn 15: exec",
+      "spreadList 19: exec",
+      "tool 44: exec",
+    ]);
+    const unlisted = check().diagnostics.find((d) => d.code === "PERM008" && d.file.endsWith("collections.ts") && d.line === 22)!;
+    expect(unlisted.message).toBe("tools given here (ai) can't all be listed, so what an AI model can trigger through them can't be checked.");
+    expect(unlisted.fix).toBe(
+      "write the tools out in the call, or in a constant it uses, so PermLang can follow each one; a tool a framework function makes (tool(...)) is followed where it's made.",
+    );
   });
 
   it("treats a library's prebuilt tool class as unverifiable", () => {
@@ -709,8 +1157,10 @@ export default class Anthropic {
     });
   });
 
-  it("finds tools in tools options written with spreads and lists, and not ones passed in", () => {
-    expect(reaches(check(), "options")).toEqual({ lookup: "fs.read", now: "nothing", run_script: "exec", tool: "nothing" });
+  it("finds tools in tools options written with spreads and lists, and can't follow ones passed in", () => {
+    // A ToolSet passed in, and records spread into each other in a loop, could hold any tool.
+    expect(reaches(check(), "options")).toEqual({ lookup: "fs.read", now: "nothing", run_script: "exec", tool: "nothing", "*": "unverifiable" });
+    expect(check().tools.filter((t) => t.file.endsWith("options.ts") && t.name === "*").map((t) => t.line)).toEqual([11, 25]);
   });
 
   it("warns only about the ones a model shouldn't trigger unchecked", () => {
@@ -728,13 +1178,48 @@ export default class Anthropic {
       "agentsMore.ts libraryEditor",
       "agentsMore.ts remote",
       "agentsMore.ts spread",
+      "collections.ts *",
+      "collections.ts *",
+      "collections.ts *",
+      "collections.ts *",
+      "collections.ts *",
+      "collections.ts cs",
+      "collections.ts helped",
+      "collections.ts later",
+      "collections.ts pushed",
+      "collections.ts quotedTool",
+      "collections.ts sh",
+      "collections.ts spreadIn",
+      "collections.ts spreadList",
+      "collections.ts tool",
+      "fastmcp.ts fm_list",
+      "fastmcp.ts fm_shell",
+      "genkit.ts gk_ask",
+      "genkit.ts gk_dynamic",
+      "genkit.ts gk_shell",
+      "genkit.ts gk_tool",
+      "hosted.ts approved",
+      "hosted.ts fromConfig",
+      "hosted.ts parsedConfig",
+      "hosted.ts spreadApproval",
       "langchain.ts NotesTool",
       "langchain.ts grep",
+      "langchain.ts inv",
       "langchain.ts shell",
       "llama.ts read_file",
       "llama.ts shell",
       "mcpv2.ts *",
       "mcpv2.ts run",
+      "openai.ts *",
+      "openai.ts *",
+      "openai.ts list_files",
+      "openai.ts lookup",
+      "openai.ts oa_shell",
+      "openai.ts parsed",
+      "openai.ts read_file",
+      "openai.ts shell",
+      "options.ts *",
+      "options.ts *",
       "options.ts lookup",
       "options.ts run_script",
       "plain.ts shell",

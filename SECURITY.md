@@ -9,8 +9,8 @@ supported.
 
 | Version | Supported |
 | --- | --- |
-| 0.3.x | ✅ |
-| 0.2.x and earlier | ❌ Upgrade to 0.3 |
+| 0.4.x | ✅ |
+| 0.3.x and earlier | ❌ Upgrade to 0.4 |
 
 ## Reporting a vulnerability
 
@@ -29,8 +29,9 @@ rather stay anonymous.
 
 - **A bypass:** code that reaches the network, files, a database, environment
   variables, or processes without PermLang reporting it, when it isn't one of the
-  documented [known limits](docs/reference.md#known-limits). This is the most
-  important kind of report.
+  documented [known limits](docs/reference.md#known-limits). So is a pull request
+  that adds access, or loosens the check, without the check failing or the
+  comment showing it. This is the most important kind of report.
 - **A problem in PermLang itself**, for example in the GitHub Action or the
   pull-request comment it posts.
 
@@ -50,8 +51,8 @@ attestation, which says which repository, workflow, and commit built it.
 To check a package from npm with the [GitHub CLI](https://cli.github.com):
 
 ```bash
-npm pack permlang@0.3.2
-gh attestation verify permlang-0.3.2.tgz --repo PermLang/PermLang
+npm pack permlang@0.4.0
+gh attestation verify permlang-0.4.0.tgz --repo PermLang/PermLang
 ```
 
 The same package is attached to each

@@ -7,6 +7,8 @@ import type { Diagnostic, Report } from "../src/check.js";
 import { formatAnnotations } from "../src/report.js";
 
 const root = path.resolve("/repo");
+/** A right-to-left override, which makes text read differently than it is. */
+const RLO = String.fromCharCode(0x202e);
 const diagnostic = (d: Partial<Diagnostic>): Diagnostic => ({
   severity: "error",
   code: "PERM001",
@@ -39,8 +41,16 @@ describe("GitHub annotations", () => {
     const hostile = diagnostic({ message: "calls x()\n::add-mask::secret\r::error::fake", capability: "net(a,b:c)" });
     const out = formatAnnotations(report([hostile]), root);
     expect(out.split("\n")).toHaveLength(1);
-    expect(out).toContain("calls x()%0A::add-mask::secret%0D::error::fake");
+    // Shown as the text report shows it: a line break in code text is `\n`, not a new line.
+    expect(out).toContain("calls x()\\n%3A%3Aadd-mask%3A%3Asecret\\r%3A%3Aerror%3A%3Afake".replaceAll("%3A", ":"));
     expect(out).toContain("title=PermLang PERM001%3A net(a%2Cb%3Ac)");
+    // Escape sequences and bidirectional overrides reached the log raw (the second verification, item 5).
+    const control = formatAnnotations(report([diagnostic({ message: `calls x(\u001b[31m${RLO})`, capability: "fs.read(\u001b)", fix: `see ${RLO}` })]), root);
+    expect(control).toContain("calls x(\\u001b[31m\\u202e)");
+    expect(control).toContain("title=PermLang PERM001%3A fs.read(\\u001b)");
+    expect(control).toContain("-> see \\u202e");
+    // PermLang's own break, before the reason, is still a line of the annotation.
+    expect(formatAnnotations(report([diagnostic({ message: "f calls g()\n  but declares nothing" })]), root)).toContain("f calls g()%0Abut declares nothing");
     // A literal "%0A" in code text stays text, not a line break.
     expect(formatAnnotations(report([diagnostic({ message: "calls fetch(\"/a%0Ab\")", fix: "" })]), root)).toContain("::calls fetch(\"/a%250Ab\")");
   });

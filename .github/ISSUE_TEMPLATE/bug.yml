@@ -19,7 +19,7 @@ body:
     id: version
     attributes:
       label: PermLang version
-      placeholder: "e.g. 0.2.0 (run permlang --version)"
+      placeholder: "e.g. 0.4.0 (run permlang --version)"
     validations:
       required: true
   - type: input

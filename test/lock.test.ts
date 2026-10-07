@@ -2,7 +2,7 @@
 // new access shows up as a change to the lock in the pull request's diff, and
 // `permlang check` fails when the code and the lock disagree.
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import { checkFiles, type Report } from "../src/check.js";
 import { commentMarker, formatDiffMarkdown, formatDiffText } from "../src/diff.js";
 import { buildLock, diffLocks, isConfigKey, lockDrift, parseLock, serializeLock, splitKey, type LockFile } from "../src/lock.js";
+import { removeTemporary } from "./temporary.js";
 
 const root = fileURLToPath(new URL("./strictness-fixtures/", import.meta.url));
 const app = path.join(root, "app.ts");
@@ -90,7 +91,7 @@ describe("lock file", () => {
       const again = buildLock(checkFiles([file]), dir);
       expect(again.unsafe).toEqual({ "u.ts#helper": "first", "u.ts#helper#2": "third", "u.ts#helper2": "second" });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTemporary(dir);
     }
   });
 
@@ -105,7 +106,7 @@ describe("lock file", () => {
       expect(splitKey("we%23ird%2520.ts#go")).toEqual(["we#ird%20.ts", "go"]);
       expect(splitKey("src/a.ts#Class.#secret#2")).toEqual(["src/a.ts", "Class.#secret"]);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTemporary(dir);
     }
   });
 

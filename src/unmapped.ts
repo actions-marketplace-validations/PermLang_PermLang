@@ -3,12 +3,21 @@
 // trial found network SDKs among them (kafkajs, redis, AI SDKs), so they are listed
 // in every report instead of passing silently. Packages that touch nothing
 // PermLang tracks are declared pure in adapters/pure.json.
+//
+// A folder of the project's with its own package.json is a package too (units.ts): the
+// JavaScript behind its .d.ts isn't analyzed. Its package.json could claim any name, so
+// only a team's adapter covers it, and neither a built-in adapter nor built-in detection
+// does. The exception is a client prisma-client-js generated there, which the Prisma
+// detector reads as it reads @prisma/client.
 
-import { Node, SyntaxKind, type NoSubstitutionTemplateLiteral, type SourceFile, type StringLiteral } from "ts-morph";
+import path from "node:path";
+import { Node, SyntaxKind, type NoSubstitutionTemplateLiteral, type Project, type SourceFile, type StringLiteral } from "ts-morph";
 import { packageOf, type AdapterIndex } from "./adapters.js";
-import { isAsset, isUrlSpecifier, loadOf, loadTarget } from "./detect/modules.js";
+import { isUrlSpecifier, loadOf, loadTarget, loadsData, referenceUsesRequire } from "./detect/modules.js";
+import { isPrismaClientJsFile } from "./detect/prisma.js";
 import { resolveAlias, resolvedDeclaration, type CallLike } from "./detect/shared.js";
-import { SQL_PACKAGES } from "./detect/sql.js";
+import { SQL_PACKAGES, isNodeSqlite } from "./detect/sql.js";
+import type { PackageFolders } from "./units.js";
 import { descendantsOfKind, forEachDescendant, lineAndColumn } from "./walk.js";
 
 export interface UnmappedPackage {
@@ -31,31 +40,35 @@ export interface UnmappedUse extends UnmappedPackage {
   /** Where the first call is, so its diagnostic can name the function. */
   node: Node;
   files: number;
+  /** For a folder of the project's with its own package.json: that folder. */
+  folder?: string;
 }
 
-export function unmappedPackages(sourceFiles: readonly SourceFile[], adapters: AdapterIndex): UnmappedUse[] {
-  const found = new Map<string, UnmappedUse & { fileSet: Set<string> }>();
-  for (const sourceFile of sourceFiles) {
-    forEachDescendant(sourceFile, (node) => {
-      if (!Node.isCallExpression(node) && !Node.isNewExpression(node) && !Node.isTaggedTemplateExpression(node)) return;
-      const pkg = untypedPackageLoad(node, adapters) ?? calledPackage(node);
-      if (pkg === undefined || HANDLED.has(pkg) || adapters.hasPackage(pkg)) return;
+/** A package a call reaches: installed, or a folder of the project's (with that folder). */
+export interface Called {
+  name: string;
+  folder?: string;
+}
 
-      const existing = found.get(pkg);
-      if (existing) {
-        existing.calls++;
-        existing.fileSet.add(sourceFile.getFilePath());
-        return;
-      }
-      found.set(pkg, {
-        package: pkg,
-        calls: 1,
-        file: sourceFile.getFilePath(),
-        line: lineAndColumn(sourceFile, node.getStart()).line,
-        node,
-        files: 1,
-        fileSet: new Set([sourceFile.getFilePath()]),
-      });
+export function unmappedPackages(sourceFiles: readonly SourceFile[], adapters: AdapterIndex, packages: PackageFolders): UnmappedUse[] {
+  const found = new Map<string, UnmappedUse & { fileSet: Set<string> }>();
+  for (const { node, package: pkg } of unmappedCalls(sourceFiles, adapters, packages)) {
+    const sourceFile = node.getSourceFile();
+    const existing = found.get(pkg.name);
+    if (existing) {
+      existing.calls++;
+      existing.fileSet.add(sourceFile.getFilePath());
+      continue;
+    }
+    found.set(pkg.name, {
+      package: pkg.name,
+      calls: 1,
+      file: sourceFile.getFilePath(),
+      line: lineAndColumn(sourceFile, node.getStart()).line,
+      node,
+      files: 1,
+      fileSet: new Set([sourceFile.getFilePath()]),
+      ...(pkg.folder !== undefined ? { folder: pkg.folder } : {}),
     });
   }
   return [...found.values()]
@@ -63,22 +76,57 @@ export function unmappedPackages(sourceFiles: readonly SourceFile[], adapters: A
     .sort((a, b) => b.calls - a.calls || a.package.localeCompare(b.package));
 }
 
+/** Every call into a package with no adapter, in file order. (Flow rules need each one; see flows.ts.) */
+export function unmappedCalls(sourceFiles: readonly SourceFile[], adapters: AdapterIndex, packages: PackageFolders): { node: CallLike; package: Called }[] {
+  const out: { node: CallLike; package: Called }[] = [];
+  const prisma = new Map<string, boolean>();
+  // A folder that holds a client prisma-client-js generated (one of its files imports Prisma's runtime).
+  const isPrismaClient = (folder: string, project: Project) => {
+    let known = prisma.get(folder);
+    if (known === undefined) {
+      known = project.getSourceFiles().some((sf) => sf.isDeclarationFile() && packages.localPackage(sf)?.folder === folder && isPrismaClientJsFile(sf));
+      prisma.set(folder, known);
+    }
+    return known;
+  };
+  for (const sourceFile of sourceFiles) {
+    forEachDescendant(sourceFile, (node) => {
+      if (!Node.isCallExpression(node) && !Node.isNewExpression(node) && !Node.isTaggedTemplateExpression(node)) return;
+      const pkg = untypedPackageLoad(node, adapters) ?? calledPackage(node, packages, isPrismaClient);
+      if (pkg !== undefined && !isCovered(pkg, adapters)) out.push({ node, package: pkg });
+    });
+  }
+  return out;
+}
+
+/** Whether something covers what a package does: an adapter, or built-in detection; for a folder of the project's, a team's adapter. */
+function isCovered(pkg: Called, adapters: AdapterIndex): boolean {
+  if (pkg.folder !== undefined) return adapters.hasTeamPackage(pkg.name);
+  return HANDLED.has(pkg.name) || adapters.hasPackage(pkg.name);
+}
+
 /** The package a call's declaration belongs to, if it's third-party code. */
-function calledPackage(node: CallLike): string | undefined {
+function calledPackage(node: CallLike, packages: PackageFolders, isPrismaClient: (folder: string, project: Project) => boolean): Called | undefined {
   // `new Client()` of a class with no declared constructor resolves to no signature; the class names the package.
   const declaration =
     resolvedDeclaration(node) ??
     (Node.isNewExpression(node) ? newTargetDeclaration(node.getExpression()) : undefined);
   if (!declaration?.getSourceFile().isDeclarationFile() && !declaration?.getSourceFile().getFilePath().includes("/node_modules/")) return undefined;
-  return packageOf(declaration);
+  const installed = packageOf(declaration);
+  // Node's own SQLite client is detected (detect/sql.ts); the npm package called sqlite isn't.
+  if (installed !== undefined) return { name: isNodeSqlite(declaration) ? "node:sqlite" : installed };
+  const local = packages.localPackage(declaration);
+  // A client Prisma generated into the project is the Prisma detector's, as @prisma/client is.
+  if (local === undefined || isPrismaClient(local.folder, declaration.getProject())) return undefined;
+  return local;
 }
 
 /** `require("kafkajs")`, or import() through a const: the package is used through `any`, like a call into it. */
-function untypedPackageLoad(node: CallLike, adapters: AdapterIndex): string | undefined {
+function untypedPackageLoad(node: CallLike, adapters: AdapterIndex): Called | undefined {
   const load = loadOf(node);
   if (!load?.untyped) return undefined;
   const target = loadTarget(load, adapters);
-  return target.kind === "package" ? target.name : undefined;
+  return target.kind === "package" ? { name: target.name } : undefined;
 }
 
 function newTargetDeclaration(expression: Node): Node | undefined {
@@ -96,17 +144,20 @@ export interface UnresolvedImport {
 /**
  * Imports whose types can't be found (a missing @types package, say). Nothing
  * called from them can be resolved, so without this their calls would pass
- * silently. First import of each specifier, in file order. Assets bundlers handle
- * are left out, and so are URL specifiers, which are unverifiable (detect/modules.ts).
+ * silently. First import of each module, in file order: a relative specifier
+ * (`./x.cjs`) names another file from each folder. Data is left out (an asset a
+ * bundler handles, or JSON: see loadsData), and so are URL specifiers, which are
+ * unverifiable (detect/modules.ts).
  */
 export function unresolvedImports(sourceFiles: readonly SourceFile[]): UnresolvedImport[] {
   const found = new Map<string, UnresolvedImport>();
   for (const sourceFile of sourceFiles) {
     for (const { specifierNode, node } of moduleReferences(sourceFile)) {
       const specifier = specifierNode.getLiteralValue();
-      if (isAsset(specifier) || isUrlSpecifier(specifier)) continue;
-      if (HANDLED.has(bareName(specifier)) || found.has(specifier) || resolves(specifierNode, node)) continue;
-      found.set(specifier, { specifier, file: sourceFile.getFilePath(), line: lineAndColumn(sourceFile, node.getStart()).line, node });
+      if (isUrlSpecifier(specifier) || loadsData(specifier, sourceFile, referenceUsesRequire(node))) continue;
+      const key = isRelative(specifier) ? path.posix.join(sourceFile.getDirectoryPath(), specifier) : specifier;
+      if (HANDLED.has(bareName(specifier)) || found.has(key) || resolves(specifierNode, node)) continue;
+      found.set(key, { specifier, file: sourceFile.getFilePath(), line: lineAndColumn(sourceFile, node.getStart()).line, node });
     }
     const process = found.has(NODE_PROCESS) ? undefined : unresolvedProcess(sourceFile);
     if (process) found.set(NODE_PROCESS, { specifier: NODE_PROCESS, file: sourceFile.getFilePath(), line: process.getStartLineNumber(), node: process });
@@ -127,11 +178,17 @@ function unresolvedProcess(sourceFile: SourceFile): Node | undefined {
   for (const id of descendantsOfKind(sourceFile, SyntaxKind.Identifier)) {
     // Declared names, property names, and shorthand properties all have a symbol, typed or not.
     if (id.getText() !== "process" || id.getSymbol() !== undefined) continue;
-    // `x.process` on an untyped `x` isn't the global.
+    // `x.process` on an untyped `x` isn't the global, but `globalThis.process` and `global.process` are.
     const parent = id.getParent();
     if (!Node.isPropertyAccessExpression(parent) || parent.getNameNode() !== id) return id;
+    if (/^(globalThis|global)$/.test(parent.getExpression().getText())) return id;
   }
   return undefined;
+}
+
+/** `./x`, `../x`: a file, relative to the one that imports it. */
+export function isRelative(specifier: string): boolean {
+  return /^\.\.?(?:\/|$)/.test(specifier);
 }
 
 /**

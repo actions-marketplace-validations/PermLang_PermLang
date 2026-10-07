@@ -8,6 +8,11 @@
 // expanded here anyway, as YAML 1.1 would, so that nothing they bring in goes
 // unrecorded if GitHub ever accepts them. A merged key doesn't replace one written
 // out: both are read, which can only record more.
+//
+// The runner, which reads Actions, parses with YamlDotNet instead. Like YAML 1.1, it also
+// ends a line at U+0085, U+2028 and U+2029, which this library reads as ordinary
+// characters: after `#note<U+2028>`, one reads a key and the other more comment. Where
+// the two can disagree, the file is unverifiable (see ambiguousBreak).
 
 import { isAlias, isMap, isPair, isScalar, isSeq, LineCounter, parseDocument, Scalar, visit, type Alias, type Document, type Node as YamlNode, type Pair, type ParsedNode, type YAMLMap } from "yaml";
 import { literalOf } from "./ci-expressions.js";
@@ -41,14 +46,22 @@ export class YamlFile {
   private readonly targets = new Map<Alias, YamlNode>();
 
   /** `text` may start with a byte-order mark: YAML allows one, and the parser skips it. */
-  constructor(text: string) {
-    this.doc = parseDocument(text, { lineCounter: this.lines, uniqueKeys: false, schema: "core" });
+  constructor(private readonly source: string) {
+    this.doc = parseDocument(source, { lineCounter: this.lines, uniqueKeys: false, schema: "core" });
     this.resolveAliases();
   }
 
   /** Parsed without errors into a mapping, as every workflow and Action is. */
   get readable(): boolean {
     return this.doc.errors.length === 0 && isMap(this.doc.contents);
+  }
+
+  /** The first line break YamlDotNet sees and this parser doesn't, if the file has one. */
+  ambiguousBreak(): Position | undefined {
+    const i = this.source.search(/[\u0085\u2028\u2029]/);
+    if (i === -1) return undefined;
+    const { line, col } = this.lines.linePos(i);
+    return { line, column: col };
   }
 
   root(): Value {

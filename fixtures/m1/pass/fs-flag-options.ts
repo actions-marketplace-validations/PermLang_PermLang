@@ -41,3 +41,12 @@ interface FileHandle {
 export async function ownHandle(handle: FileHandle) {
   await handle.chmod(0o644);
 }
+
+// Each function reads only its own option name: a stream ignores `flag`, readFile ignores `flags`.
+/** @perm fs.read(./data) */
+export async function otherFlagNames() {
+  // @ts-expect-error `flag` isn't a stream option
+  createReadStream("./data/m.log", { flag: "w" });
+  // @ts-expect-error `flags` isn't a readFile option
+  await readFile("./data/n.json", { flags: "a" });
+}

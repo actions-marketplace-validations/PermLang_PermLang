@@ -3,11 +3,12 @@
 // reported (found in the code review, O2). Bugs are simulated by making one function throw.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runCli, runCliStreams } from "./run-cli.js";
+import { removeTemporary } from "./temporary.js";
 
 /** What each stand-in throws, when set. */
 const fail = vi.hoisted(() => ({ formatText: undefined as unknown, settingsEntries: undefined as unknown, formatDiffMarkdown: undefined as unknown }));
@@ -51,7 +52,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   fail.formatText = fail.settingsEntries = fail.formatDiffMarkdown = undefined;
-  rmSync(dir, { recursive: true, force: true });
+  removeTemporary(dir);
 });
 
 const check = () => runCliStreams(["check", "src", "--no-lock"], { cwd: dir });

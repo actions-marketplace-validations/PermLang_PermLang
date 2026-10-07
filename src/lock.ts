@@ -7,6 +7,7 @@
 //     "permlang": 2,
 //     "functions": {
 //       "permlang.config.json#<permlang.config.json>": ["permlang.files(src)", "permlang.strictness(development)", ...],
+//       "permlang.config.json#<unchecked>": ["unchecked.package(kafkajs)"],
 //       "src/leads.ts#handleLead": ["db.write(lead)", "email.send"]
 //     },
 //     "unsafe": { "src/render.ts#compile": "template compiler; trusted input" }
@@ -21,6 +22,7 @@
 import path from "node:path";
 import type { Diagnostic, Report } from "./check.js";
 import { describeScope, isSetting, isSingleValued, scopeOf, settingKind, settingPhrase } from "./settings.js";
+import { isUncheckedKey, uncheckedCode } from "./unchecked.js";
 
 export const LOCK_VERSION = 2;
 
@@ -120,6 +122,8 @@ export function lockDrift(committed: LockFile, current: LockFile, report: Report
   const root = path.dirname(lockFile);
   const lockName = path.basename(lockFile);
   const fix = "run `permlang lock` and commit the change so reviewers see it.";
+  const uncheckedFix =
+    "it could do anything: review what it runs, then run `permlang lock` and commit the change so reviewers see it. To have it checked instead, install its types, or add an adapter for it.";
   const settingsFix =
     "to make these the settings, run `permlang lock` with the same options and commit the change so reviewers see it. To try other settings without the lock, add --no-lock.";
   const inLock = (key: string, capability?: string, from = 0) => ({ file: lockFile, line: lineInLock(lockText, key, capability, from) ?? 1, column: 1 });
@@ -161,6 +165,7 @@ export function lockDrift(committed: LockFile, current: LockFile, report: Report
   for (const change of changes.functions) {
     const fn = locations.get(change.key);
     const config = isConfigKey(change.key);
+    const unchecked = isUncheckedKey(change.key);
     const settings = config ? change.added.filter(isSetting) : [];
     const oldSettings = config ? change.removed.filter(isSetting) : [];
     // A setting with one value that changed: one error that gives both values.
@@ -177,21 +182,26 @@ export function lockDrift(committed: LockFile, current: LockFile, report: Report
       const setting = settings.includes(capability);
       const old = paired.get(capability);
       const subject = `${settingSubject(change.file, capability)} ${settingPhrase(capability)}${setting ? origin(via[capability]![0]) : ""}`;
+      // A file the checked files import isn't a setting to choose: recording it is all there is to do.
+      const settingFix = setting && !isImported(capability);
       out.push(
         drift({
-          file,
+          // Code PermLang can't check is recorded where it's imported or called.
+          file: site.file ?? file,
           line: site.line,
           column: site.column,
           function: change.name,
           capability,
-          message: old
-            ? `${subject}, but ${lockName} records ${settingPhrase(old)}.`
-            : setting
-              ? `${subject}, which ${lockName} doesn't record.`
-              : config
-                ? `${change.file} now grants ${capability}, which ${lockName} doesn't record.`
-                : `${change.name} can now reach ${capability}, which ${lockName} doesn't record.`,
-          fix: setting ? settingsFix : fix,
+          message: unchecked
+            ? uncheckedMessage(capability, lockName, "new")
+            : old
+              ? `${subject}, but ${lockName} records ${settingPhrase(old)}.`
+              : setting
+                ? `${subject}, which ${lockName} doesn't record.`
+                : config
+                  ? `${change.file} now grants ${capability}, which ${lockName} doesn't record.`
+                  : `${change.name} can now reach ${capability}, which ${lockName} doesn't record.`,
+          fix: unchecked ? uncheckedFix : settingFix ? settingsFix : fix,
         }),
       );
     }
@@ -205,12 +215,14 @@ export function lockDrift(committed: LockFile, current: LockFile, report: Report
           ...inLock(change.key, capability),
           function: change.name,
           capability,
-          message: setting
-            ? `${lockName} records ${settingPhrase(capability)}, which ${capability.startsWith("tsconfig.") ? `${change.file} no longer has` : "the check no longer runs with"}.`
-            : config
-              ? `${change.file} ${gone} grants ${capability}, but ${lockName} still records it.`
-              : `${change.name} ${gone} reaches ${capability}, but ${lockName} still records it.`,
-          fix: setting ? settingsFix : fix,
+          message: unchecked
+            ? uncheckedMessage(capability, lockName, "gone")
+            : setting
+              ? `${lockName} records ${settingPhrase(capability)}, which ${capability.startsWith("tsconfig.") ? `${change.file} no longer has` : isImported(capability) ? "the check no longer reads" : "the check no longer runs with"}.`
+              : config
+                ? `${change.file} ${gone} grants ${capability}, but ${lockName} still records it.`
+                : `${change.name} ${gone} reaches ${capability}, but ${lockName} still records it.`,
+          fix: setting && !isImported(capability) ? settingsFix : fix,
         }),
       );
     }
@@ -238,7 +250,20 @@ export function lockDrift(committed: LockFile, current: LockFile, report: Report
 
 /** "The check runs with" for PermLang's own settings; "tsconfig.json now has" for the project's. */
 function settingSubject(file: string, capability: string): string {
+  if (isImported(capability)) return "The check now also reads";
   return capability.startsWith("tsconfig.") ? `${file} now has` : "The check runs with";
+}
+
+/** Code PermLang can't check (unchecked.ts) that's new, or that the lock records and the code no longer has. */
+function uncheckedMessage(capability: string, lockName: string, change: "new" | "gone"): string {
+  const { kind, target } = uncheckedCode(capability);
+  if (change === "new") return `PermLang can't check ${target}: ${kind === "import" ? "its types can't be found" : "it has no adapter"}, and ${lockName} doesn't record it.`;
+  return `${lockName} records ${target} as code PermLang can't check, which the code no longer ${kind === "import" ? "imports" : "calls into"}.`;
+}
+
+/** A file the check read because a checked file imports it (`permlang.imported(lib/db.ts)`). */
+function isImported(capability: string): boolean {
+  return capability.startsWith("permlang.imported(");
 }
 
 /** Where a setting came from, when it isn't the config file: a command-line option, or the default. */

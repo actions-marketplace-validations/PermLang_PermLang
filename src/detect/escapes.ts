@@ -11,13 +11,18 @@
 //     `(self as any).fetch(url)` is a fetch call, with its host, and
 //     `(process as any).env.KEY` reads env(KEY). Anything else is left alone:
 //     these objects are cast to `any` all the time for harmless reasons
-//     (`(window as any).dataLayer`, `const w = window as any`).
+//     (`(window as any).dataLayer`, `const w = window as any`). Database clients
+//     (a Prisma client or model, a Drizzle database, a SQL pool) are followed the
+//     same way: `(prisma as any).lead.deleteMany()` is a Prisma call.
 //   - A capability module: any value whose type is one (a namespace or default
 //     import, `import cp = require(...)`, the result of `await import(...)` or
 //     `process.getBuiltinModule(...)`, or a module of the project's own that
-//     re-exports one). Named members are looked up the same way. Any other escape
-//     (a computed member, storing it, passing it on as `any` or `unknown`,
-//     enumerating it with `Object.values`) loses track of it, and is unverifiable.
+//     re-exports one). Named members are looked up the same way; one that's called
+//     or constructed returns `any` too, so a result that reaches a capability
+//     (`new (pg as any).Client()`) is unverifiable. Any other escape (a computed
+//     member, storing it, passing it on as `any` or `unknown` or to a generic or
+//     mapped parameter, copying it with a spread, enumerating it with
+//     `Object.values`) loses track of it, and is unverifiable.
 //
 // A cast through `unknown` to a hand-written type (`x as unknown as { exec(): void }`)
 // erases the original type just like `any` does, and is treated the same.
@@ -29,6 +34,7 @@
 import {
   Node,
   SyntaxKind,
+  ts,
   type CallExpression,
   type ElementAccessExpression,
   type Identifier,
@@ -40,8 +46,8 @@ import {
 } from "ts-morph";
 import type { AdapterIndex } from "../adapters.js";
 import { UNVERIFIABLE, type Capability } from "../capability.js";
-import { requiresCapabilityModule } from "./functions.js";
-import { argumentsOf, callText, containerName, literalString, resolveAlias, resolvedDeclaration, unwrapExpression, type CapabilityUse } from "./shared.js";
+import { isDatabaseObject, requiresCapabilityModule } from "./functions.js";
+import { argumentsOf, callText, containerName, literalString, resolveAlias, resolvedDeclaration, signatureDeclarations, unwrapExpression, type CapabilityUse } from "./shared.js";
 import { capabilitiesOf, constructorCapabilities } from "./web.js";
 import { forEachDescendant } from "../walk.js";
 
@@ -85,14 +91,24 @@ export function anyEscapes(sourceFile: SourceFile, adapters: AdapterIndex): Esca
       // `fs[name]` read with a computed key, rather than called (calls are in computed.ts).
       else if (Node.isElementAccessExpression(node) && isComputedModuleRead(node, carriers)) out.push(hidden(node, "read with a computed key"));
     }
+    // `import cp from "node:child_process"` where the compiler options give the module no default
+    // export (allowSyntheticDefaultImports off, as with module commonjs and no esModuleInterop):
+    // TypeScript types `cp` as `any`, but bundlers and Node's own interop still hand over the
+    // module. A named member is looked up on the module; any other use loses track of it.
+    else if (Node.isIdentifier(node) && carriers.untypedDefault(node)) {
+      const use = untypedDefaultUse(node, carriers.untypedDefault(node)!, adapters);
+      if (use) out.push(use);
+    }
     // A capability module used where its type is lost: `const m: any = cp`, `m = cp` with
-    // `let m: any`, `use(cp)` with `function use(m: unknown)`, `run.call(cp)`, or `Object.values(cp)`.
+    // `let m: any`, `use(cp)` with `function use(m: unknown)` (or `<T>(m: T)`), `run.call(cp)`,
+    // `Object.values(cp)`, or `{ ...cp }`.
     else if (Node.isIdentifier(node) && isPassedOn(node) && carriers.of(node) === "module") {
       const receiver = thisReceiver(node);
-      const lost = receiver ? undefined : typeLostBy(node);
+      const lost = receiver ? undefined : typeLostBy(node) ?? genericParameterType(node);
       if (receiver === "project") out.push(hidden(node, "given as `this`"));
       else if (lost) out.push(hidden(node, lost.isAny() ? "cast to `any`" : `passed on as \`${lost.getText()}\``));
       else if (isEnumerated(node)) out.push(hidden(node, "with its members listed"));
+      else if (Node.isSpreadAssignment(node.getParent())) out.push(hidden(node, "copied with a spread"));
     }
     // `Reflect.get(cp, name)`, the same as `cp[name]`.
     else if (Node.isCallExpression(node) && isComputedReflectGet(node, carriers)) out.push(hidden(node, "read with a computed key"));
@@ -141,10 +157,28 @@ class CarrierCache {
 
   of(value: Node): Carrier | undefined {
     if (isGlobalObject(value)) return "global";
+    // A database client is followed like a global object: by the members read off a cast.
+    if ((Node.isIdentifier(value) || Node.isPropertyAccessExpression(value)) && isDatabaseObject(value.getType())) return "global";
     if (Node.isIdentifier(value) && this.importsCapabilityModule(value)) return "module";
     // Literals, `this`, and the like are never modules; only look at the type of a name or an expression that can hold one.
     const holds = Node.isIdentifier(value) || Node.isPropertyAccessExpression(value) || Node.isAwaitExpression(value) || Node.isCallExpression(value);
     return holds && this.isCapabilityModule(value.getType(), value) ? "module" : undefined;
+  }
+
+  /**
+   * For a reference to a default import of a capability module that TypeScript types as `any`
+   * (the module has no default export under the compiler options), the module's own type.
+   */
+  untypedDefault(id: Identifier): Type | undefined {
+    const parent = id.getParent();
+    // `export { cp }` names the export; the import it hands on is its local target.
+    const symbol = Node.isExportSpecifier(parent) && parent.getNameNode() === id ? parent.getLocalTargetSymbol() : id.getSymbol();
+    const clause = symbol?.getDeclarations().find((d) => Node.isImportClause(d));
+    if (!clause || !Node.isImportClause(clause) || clause.getDefaultImport()?.getType().isAny() !== true) return undefined;
+    const declaration = clause.getParentIfKindOrThrow(SyntaxKind.ImportDeclaration);
+    if (!this.isCapabilityModuleName(declaration.getModuleSpecifierValue())) return undefined;
+    // A module that doesn't resolve at all is an import with no types (PERM007, unmapped.ts).
+    return declaration.getModuleSpecifier().getSymbol()?.getTypeAtLocation(declaration);
   }
 
   /** A namespace or default import of a capability module: `import fs from "node:fs"`, `import cluster from "node:cluster"`. */
@@ -232,6 +266,30 @@ function typeLostBy(identifier: Identifier): Type | undefined {
 }
 
 /**
+ * The declared type of a project function's parameter that takes a module under a type of its
+ * own: a type parameter (`<T>(m: T)`), or a mapped type (`Partial<typeof cp>`, `Pick<...>`).
+ * The argument's contextual type is the module's, but inside the function the module is a `T`,
+ * which a cast loses (`(m as any).exec(cmd)`). Library functions are trusted, as everywhere.
+ */
+function genericParameterType(identifier: Identifier): Type | undefined {
+  const call = identifier.getParent();
+  if (!Node.isCallExpression(call) && !Node.isNewExpression(call)) return undefined;
+  const index = call.getArguments().indexOf(identifier);
+  const declaration = index < 0 ? undefined : resolvedDeclaration(call);
+  if (!declaration || declaration.getSourceFile().isDeclarationFile() || !("getParameters" in declaration)) return undefined;
+  const parameters = (declaration as { getParameters(): ParameterDeclaration[] }).getParameters();
+  // Past the last parameter, an argument is the rest parameter's. (With none, its contextual type
+  // is `any`, which typeLostBy reports before this is asked.)
+  const parameter = parameters[Math.min(index, parameters.length - 1)]!;
+  const declared = parameter.getType();
+  // A rest parameter passes its elements, or is a type parameter itself (`...args: T`).
+  const type = parameter.isRestParameter() ? declared.getArrayElementType() ?? declared : declared;
+  // An optional parameter's type is a union with `undefined`.
+  const generic = (t: Type) => t.isTypeParameter() || (t.getObjectFlags() & ts.ObjectFlags.Mapped) !== 0;
+  return (type.isUnion() ? type.getUnionTypes() : [type]).some(generic) ? type : undefined;
+}
+
+/**
  * Whose function a module is given to as `this`, by `.call`, `.apply`, or `.bind`: a library's
  * (`fs.readFile.bind(fs)`), trusted like library code everywhere, or the project's own (or one
  * that can't be resolved), which could use `this` as anything, whatever the contextual type
@@ -303,9 +361,9 @@ function processInternal(access: PropertyAccessExpression | ElementAccessExpress
  * Returns null for a member that isn't a capability, and undefined when the use isn't a single
  * named member (a module's escape is then reported as hidden).
  */
-function memberUse(cast: Node, value: Node, carrier: Carrier, adapters: AdapterIndex): EscapeUse | null | undefined {
+function memberUse(cast: Node, value: Node, carrier: Carrier, adapters: AdapterIndex, original = value.getType()): EscapeUse | null | undefined {
   let object: Node = outerOf(cast);
-  let type = value.getType();
+  let type = original;
   let name: string | undefined;
   for (let depth = 0; depth < 8; depth++) {
     const access = object.getParent();
@@ -329,7 +387,7 @@ function memberUse(cast: Node, value: Node, carrier: Carrier, adapters: AdapterI
 
     // `(globalThis as any).process.mainModule.require(...)`: an optional member's members are still there.
     type = property.getTypeAtLocation(access).getNonNullableType();
-    const used = propertyUse(property, type, access, adapters);
+    const used = propertyUse(property, type, access, adapters) ?? (carrier === "module" ? returnedUse(type, access, adapters) : undefined);
     if (used) return used;
     object = access;
   }
@@ -338,6 +396,21 @@ function memberUse(cast: Node, value: Node, carrier: Carrier, adapters: AdapterI
   // could a namespace-like member of a capability module (`(fs as any).promises`).
   if (name !== undefined && GLOBAL_OBJECTS.has(name)) return hidden(value);
   return carrier === "module" && isModuleObject(type, adapters) ? hidden(value) : null;
+}
+
+/**
+ * A use of a default import TypeScript types as `any` (see CarrierCache.untypedDefault), with
+ * `module` its module's type: a named member as the module declares it (`cp.execSync(...)`), or
+ * hidden for any other use (destructured, passed on, exported). The import itself, a type
+ * position, and a cast (checked as one) aren't uses.
+ */
+function untypedDefaultUse(id: Identifier, module: Type, adapters: AdapterIndex): EscapeUse | undefined {
+  const parent = outerOf(id).getParent();
+  if (Node.isImportClause(id.getParent()) || id.getFirstAncestor((a) => Node.isTypeNode(a) || Node.isJSDoc(a))) return undefined;
+  if (Node.isAsExpression(parent) || Node.isTypeAssertion(parent) || Node.isSatisfiesExpression(parent)) return undefined;
+  const member = memberUse(id, id, "module", adapters, module);
+  if (member !== undefined) return member ?? undefined;
+  return hidden(id, "imported as a default export the module doesn't have under these compiler options");
 }
 
 /** What reading, calling, or constructing one member read past a cast, of type `type`, touches, if anything. */
@@ -365,6 +438,32 @@ function propertyUse(property: MorphSymbol, type: Type, access: Node, adapters: 
     return hidden(call!, "returned as `any`");
   }
   return undefined;
+}
+
+/**
+ * A capability module's function or class, called or constructed past a cast, whose result
+ * reaches a capability: that result is `any` too, so nothing called on it can be checked
+ * (`new (pg as any).Client().query(sql)`, `(module as any).createRequire(file)(name)`).
+ */
+function returnedUse(type: Type, access: Node, adapters: AdapterIndex): EscapeUse | undefined {
+  const call = access.getParent();
+  if ((!Node.isCallExpression(call) && !Node.isNewExpression(call)) || call.getExpression() !== access) return undefined;
+  const signatures = Node.isNewExpression(call) ? type.getConstructSignatures() : type.getCallSignatures();
+  const reaches = signatures.some((s) => carriesCapabilities(awaited(s.getReturnType()), adapters));
+  return reaches ? hidden(call, "returned as `any`") : undefined;
+}
+
+/** What a promise resolves to, or the type itself. */
+function awaited(type: Type): Type {
+  const isPromise = type.getSymbol()?.getName() === "Promise" && type.getSymbol()!.getDeclarations().some((d) => d.getSourceFile().isDeclarationFile());
+  return (isPromise ? type.getTypeArguments()[0] : undefined) ?? type;
+}
+
+/** Whether calling a value of `type`, or one of its methods, reaches a capability. */
+function carriesCapabilities(type: Type, adapters: AdapterIndex): boolean {
+  const reaches = (declaration: Node) => capabilitiesOf(declaration, [], adapters).length > 0;
+  if (signatureDeclarations(type.getCallSignatures()).some(reaches)) return true;
+  return type.getProperties().some((p) => resolveAlias(p).getDeclarations().some(reaches));
 }
 
 /** `(process as any).env.KEY`, `(process as any).env`: the environment, read past the cast. */

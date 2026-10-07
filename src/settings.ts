@@ -7,6 +7,7 @@
 //
 //   permlang.config.json#<permlang.config.json>
 //     permlang.files(src)                       the paths checked, or permlang.project(tsconfig.json)
+//     permlang.imported(lib/db.ts)              each file read only because a checked file imports it
 //     permlang.strictness(development)          the settings in effect, command-line options included
 //     permlang.unmapped(warn)
 //     permlang.tools(warn)
@@ -15,7 +16,8 @@
 //   tsconfig.json#<tsconfig.json>               when the files come from a TypeScript project
 //     tsconfig.include(src)                     which files it selects, following "extends"
 //     tsconfig.exclude(src/legacy)
-//     tsconfig.paths(@app/* -> src/*)           and the options that decide what imports resolve to
+//     tsconfig.paths(@app/* -> src/*)           and the options that decide what imports resolve to,
+//     tsconfig.allowSyntheticDefaultImports(false)  some always, as TypeScript works them out
 //
 // The settings recorded are the ones in effect, so a --strictness option, or the Action's
 // strictness input, counts as much as the config file: a workflow change can't loosen the
@@ -105,8 +107,11 @@ export interface Settings {
   scope: { project: string; found: boolean } | { paths: readonly string[]; given: boolean };
 }
 
-/** The lock entries for these settings: one for the settings, and one for the TypeScript project's file selection. */
-export function settingsEntries(settings: Settings, root: string): FunctionReport[] {
+/**
+ * The lock entries for these settings: one for the settings, and one for the TypeScript project's
+ * file selection. `imported` are the files the check also read because the selected ones import them.
+ */
+export function settingsEntries(settings: Settings, root: string, imported: readonly string[] = []): FunctionReport[] {
   const name = path.basename(settings.configFile);
   const text = readIfFile(settings.configFile);
   const entry = new Entry(settings.configFile, name);
@@ -115,6 +120,7 @@ export function settingsEntries(settings: Settings, root: string): FunctionRepor
   const scope = settings.scope;
   if ("project" in scope) entry.add(`permlang.project(${relative(root, scope.project)})`, scope.found ? "found" : "--project", 1);
   else for (const p of [...new Set(scope.paths.map((p) => relative(root, p)))].sort()) entry.add(`permlang.files(${p})`, scope.given ? "paths" : "default", 1);
+  for (const file of imported) entry.add(`permlang.imported(${relative(root, file)})`, "imported", 1);
 
   for (const key of ["strictness", "unmapped", "tools"] as const) {
     const { value, from } = settings[key];
@@ -131,8 +137,9 @@ export function settingsEntries(settings: Settings, root: string): FunctionRepor
 
 /**
  * Reads a TypeScript project's config, following "extends".
- * @throws SettingsError when it's missing, malformed, or extends a file that can't be read
- *   (which would silently change the files checked).
+ * @throws SettingsError when it's missing, malformed, extends a file that can't be read, lists
+ *   a file in "files" that isn't there, or selects no files at all (each of which would
+ *   silently change the files checked, or leave none to fail on).
  */
 export function readTsConfig(file: string): ts.ParsedCommandLine {
   if (!existsSync(file)) throw new SettingsError(`${file} doesn't exist.`);
@@ -146,6 +153,11 @@ export function readTsConfig(file: string): ts.ParsedCommandLine {
   // unknown compiler option, don't change which files are read.
   const problem = ts.getConfigFileParsingDiagnostics(parsed).find((d) => d.code < 2000 || d.code === 5083);
   if (problem) throw new SettingsError(`${file}: ${printable(ts.flattenDiagnosticMessageText(problem.messageText, " "))}`);
+  // TypeScript reports these when it builds the program (TS6053, and TS18002 or TS18003 above),
+  // and builds nothing; the check would pass on what's left.
+  const missing = parsed.fileNames.find((f) => !ts.sys.fileExists(f));
+  if (missing !== undefined) throw new SettingsError(`${file}: "files" lists ${printable(relative(process.cwd(), missing))}, which doesn't exist.`);
+  if (parsed.fileNames.length === 0) throw new SettingsError(`${file} selects no files: nothing matches its "include" or "files".`);
   return parsed;
 }
 
@@ -188,13 +200,85 @@ function tsconfigEntry(file: string, root: string): FunctionReport {
   for (const d of o.typeRoots ?? []) option("typeRoots", relative(dir, d));
   if (o.types) for (const t of o.types.length > 0 ? o.types : ["none"]) option("types", t);
   for (const l of o.lib ?? []) option("lib", l.replace(/^lib\./, "").replace(/\.d\.ts$/, ""));
-  if (o.noLib) option("noLib", "true");
-  if (o.allowJs) option("allowJs", "true");
-  if (o.moduleResolution !== undefined) option("moduleResolution", ts.ModuleResolutionKind[o.moduleResolution]);
   for (const c of o.customConditions ?? []) option("customConditions", c);
   for (const s of o.moduleSuffixes ?? []) option("moduleSuffixes", s === "" ? "none" : s);
+  // The value TypeScript uses, set or worked out from the others: `module` decides
+  // `moduleResolution`, and both decide whether a default import of a CommonJS module is the
+  // module or nothing.
+  for (const key of COMPUTED) {
+    const shown = optionValue(key, computedOption(o, key));
+    if (o[key] !== undefined) option(key, shown);
+    else entry.add(`tsconfig.${key}(${shown})`, "default", 1);
+  }
+  // Off unless set. noResolve isn't among them: the check resolves imports regardless (load.ts).
+  if (o.noLib) option("noLib", "true");
+  // allowJs, or checkJs, which turns it on.
+  if (computedOption(o, "allowJs")) option("allowJs", "true");
+  // A workspace package linked into node_modules stays a package there, which isn't analyzed.
+  if (o.preserveSymlinks) option("preserveSymlinks", "true");
+  // An import of any file (`./x.css`) can resolve to a declaration file for it (`x.d.css.ts`).
+  if (o.allowArbitraryExtensions) option("allowArbitraryExtensions", "true");
+  // Packages named @typescript/lib-* replace the built-in declarations of globals (fetch, ...).
+  if (o.libReplacement !== undefined) option("libReplacement", String(o.libReplacement));
+  // Compiled code imports its helpers from tslib.
+  if (o.importHelpers) option("importHelpers", "true");
+  // What every JSX element calls.
+  if (o.jsx !== undefined) option("jsx", JSX[o.jsx]);
+  for (const key of ["jsxFactory", "jsxFragmentFactory", "jsxImportSource", "reactNamespace"] as const) if (o[key]) option(key, o[key]);
   return entry.report();
 }
+
+/** Options whose value TypeScript works out from the others when they aren't set: always recorded. */
+const COMPUTED = [
+  "target",
+  "module",
+  "moduleResolution",
+  "moduleDetection",
+  "esModuleInterop",
+  "allowSyntheticDefaultImports",
+  "resolvePackageJsonExports",
+  "resolvePackageJsonImports",
+  "useDefineForClassFields",
+] as const;
+
+/**
+ * An option's value as TypeScript works it out: as set, or from the options it depends on.
+ * TypeScript keeps these rules in `computedOptions`, which isn't in its public types; a missing
+ * rule throws (exit code 2), and the tests cover each one used.
+ */
+function computedOption(options: ts.CompilerOptions, key: (typeof COMPUTED)[number] | "allowJs"): unknown {
+  const rules = (ts as unknown as { computedOptions: Record<string, { computeValue(o: ts.CompilerOptions): unknown }> }).computedOptions;
+  return rules[key]!.computeValue(options);
+}
+
+/** An option's value as a word: an enum's name (`ESNext`, `Bundler`), or `true`/`false`. */
+function optionValue(key: (typeof COMPUTED)[number], value: unknown): string {
+  const names = ENUM_NAMES[key];
+  // The options named there are numbers; the others are true or false.
+  return names ? names[value as number]! : String(value);
+}
+
+/** The names of the values of the options in COMPUTED that are enums, from TypeScript's own enums. */
+const ENUM_NAMES: Partial<Record<(typeof COMPUTED)[number], Record<number, string>>> = {
+  // ESNext and Latest are the same target; the enum's own reverse lookup gives the latter.
+  target: { ...ts.ScriptTarget, [ts.ScriptTarget.ESNext]: "ESNext" },
+  module: ts.ModuleKind,
+  moduleResolution: ts.ModuleResolutionKind,
+  moduleDetection: ts.ModuleDetectionKind,
+};
+
+/**
+ * "jsx" as tsconfig.json spells it. Every value is listed (tsconfig.json can't set None), so a
+ * TypeScript release that adds one fails PermLang's own typecheck until it's added here.
+ */
+const JSX: Record<ts.JsxEmit, string> = {
+  [ts.JsxEmit.None]: "none",
+  [ts.JsxEmit.Preserve]: "preserve",
+  [ts.JsxEmit.React]: "react",
+  [ts.JsxEmit.ReactNative]: "react-native",
+  [ts.JsxEmit.ReactJSX]: "react-jsx",
+  [ts.JsxEmit.ReactJSXDev]: "react-jsxdev",
+};
 
 // --- reading settings back from a lock --------------------------------------------
 
@@ -222,8 +306,13 @@ export function settingKind(capability: string): string {
 
 /** Settings that hold one value, so a change is one old value and one new one. */
 export function isSingleValued(capability: string): boolean {
-  return ["strictness", "unmapped", "tools", "tsconfig.baseUrl", "tsconfig.noLib", "tsconfig.allowJs", "tsconfig.moduleResolution"].includes(settingKind(capability));
+  const kind = settingKind(capability);
+  if (kind.startsWith("tsconfig.")) return !LISTS.has(kind.slice("tsconfig.".length));
+  return ["strictness", "unmapped", "tools"].includes(kind);
 }
+
+/** tsconfig.json's settings that are lists, recorded a value at a time. */
+const LISTS = new Set(["include", "exclude", "files", "paths", "rootDirs", "typeRoots", "types", "lib", "customConditions", "moduleSuffixes"]);
 
 /**
  * A setting as a phrase: "strictness sketch", "unmapped: trust", "the adapter x.json (sha256:…)",
@@ -238,6 +327,7 @@ export function settingPhrase(capability: string): string {
   if (kind === "adapter") return `the adapter ${v.replace(/ (sha256:\w+)$/, " ($1)")}`;
   if (kind === "project") return `the files of ${v}`;
   if (kind === "files") return `the files under ${v}`;
+  if (kind === "imported") return `${v} (imported by the checked files)`;
   return `${kind.replace(/^tsconfig\./, "")} ${v}`;
 }
 

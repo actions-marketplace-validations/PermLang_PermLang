@@ -1,7 +1,7 @@
 {
   "name": "permlang",
-  "version": "0.3.3",
-  "description": "Build-time permission checker for TypeScript and AI agents. Fails the pull request when code starts reaching a new server, file, secret, database table, risky MCP tool, or CI permission.",
+  "version": "0.4.1",
+  "description": "Build-time permission checker for TypeScript and AI agents. Fails the pull request when code starts reaching a new server, file, secret, database table, or CI permission, and flags risky MCP and other AI tools.",
   "keywords": [
     "permissions",
     "capabilities",
@@ -55,6 +55,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "permlang": "tsx src/cli.ts",
+    "permlang:released": "node scripts/permlang-released.mjs",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {

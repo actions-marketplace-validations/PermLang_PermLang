@@ -1,5 +1,5 @@
 name: PermLang
-description: Fail pull requests that give TypeScript code new access to servers, files, secrets, databases, AI tools, or CI permissions.
+description: Fail pull requests that give TypeScript code new access to servers, files, secrets, databases, or CI. Flag risky AI tools.
 author: PermLang
 branding:
   icon: shield
@@ -7,7 +7,7 @@ branding:
 
 inputs:
   args:
-    description: Arguments for `permlang check`, such as source paths or `--project tsconfig.json`. The lock file records them, so changing them needs `permlang lock` with the same arguments.
+    description: Arguments for `permlang check`, such as source paths or `--project tsconfig.json`, split on spaces. The lock file records them, so changing them needs `permlang lock` with the same arguments. An option `check` doesn't take is an error.
     required: false
     default: ""
   strictness:
@@ -134,48 +134,40 @@ runs:
           ${{ steps.build-key.outputs.dir }}/dist
         key: ${{ steps.build-key.outputs.key }}
 
-    # Deleting the lock file mustn't turn the check off. When the base commit of a pull
-    # request (or merge queue entry) has the lock, the check requires it; when the base
-    # can't be fetched, too.
+    # Deleting the lock file, or pointing the check at another one, mustn't turn it off. On a
+    # pull request (or merge queue entry), the check compares with the base commit (--base): it
+    # requires the lock file when the base has it, and fails when the change stops checking with
+    # the base's lock. PermLang reads `args` for that itself, as the check will. When the base
+    # can't be fetched, the lock is required anyway.
     - name: Look up the base commit
       id: base
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
         NODE: ${{ steps.node.outputs.path }}
-        ARGS: ${{ inputs.args }}
         BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
       run: |
         set +e
-        set -f  # ARGS is split on spaces, like a command line, but never glob-expanded.
-        # The lock file the check reads: --lock in the arguments, else permlang.lock.json.
-        lock=permlang.lock.json
-        args=($ARGS)
-        for ((i = 0; i + 1 < ${#args[@]}; i++)); do
-          if [ "${args[i]}" = "--lock" ]; then lock="${args[i+1]}"; fi
-        done
         fetched=false
-        base_has_lock=false
-        require=false
         if [ -n "$BASE_SHA" ]; then
-          if git fetch --no-tags --depth=1 origin "$BASE_SHA"; then
+          # A full clone (fetch-depth: 0) has it already, and fetching it with --depth would make
+          # the clone shallow. A shallow one fetches just that commit.
+          if git cat-file -e "$BASE_SHA^{commit}" 2> /dev/null; then
             fetched=true
-            if git cat-file -e "$BASE_SHA:./$lock" 2> /dev/null; then
-              base_has_lock=true
-              require=true
-            fi
           else
-            echo "::warning::Couldn't fetch the base commit, so a missing lock file fails the check, and the permission diff can't be shown."
-            require=true
+            depth=()
+            [ "$(git rev-parse --is-shallow-repository)" = true ] && depth=(--depth=1)
+            if git fetch --no-tags "${depth[@]}" origin "$BASE_SHA"; then
+              fetched=true
+            else
+              echo "::warning::Couldn't fetch the base commit, so a missing lock file fails the check, and the permission diff can't be shown."
+            fi
           fi
         fi
         # This folder, from the repository root: it tells apart several runs on one pull request.
         folder=$("$NODE" -e 'const p = require("path"); process.stdout.write(p.relative(process.env.GITHUB_WORKSPACE || ".", ".").split(p.sep).join("/").replace(/[\x00-\x1f]/g, ""))')
         {
-          echo "lock=$lock"
           echo "fetched=$fetched"
-          echo "base-has-lock=$base_has_lock"
-          echo "require-lock=$require"
           echo "sarif-category=permlang${folder:+/$folder}"
         } >> "$GITHUB_OUTPUT"
 
@@ -189,13 +181,18 @@ runs:
         STRICTNESS: ${{ inputs.strictness }}
         ARGS: ${{ inputs.args }}
         SARIF: ${{ inputs.sarif }}
-        REQUIRE_LOCK: ${{ steps.base.outputs.require-lock }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        FETCHED: ${{ steps.base.outputs.fetched }}
       run: |
         set +e
         set -f  # ARGS is split on spaces, like a command line, but never glob-expanded.
         extra=()
         [ -n "$STRICTNESS" ] && extra+=(--strictness "$STRICTNESS")
-        [ "$REQUIRE_LOCK" = "true" ] && extra+=(--require-lock)
+        if [ "$FETCHED" = "true" ]; then
+          extra+=(--base "$BASE_SHA")
+        elif [ -n "$BASE_SHA" ]; then
+          extra+=(--require-lock)
+        fi
         [ "$SARIF" = "true" ] && extra+=(--sarif "$RUNNER_TEMP/permlang.sarif")
         # Annotations put each problem on its line in the pull request's "Files changed" tab.
         "$NODE" "$PERMLANG" check $ARGS "${extra[@]}" --github-annotations
@@ -226,37 +223,53 @@ runs:
         HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         ARGS: ${{ inputs.args }}
         STRICTNESS: ${{ inputs.strictness }}
-        LOCK: ${{ steps.base.outputs.lock }}
-        FETCHED: ${{ steps.base.outputs.fetched }}
-        BASE_HAS_LOCK: ${{ steps.base.outputs.base-has-lock }}
+        CHECK_EXIT: ${{ steps.check.outputs.exit-code }}
       run: |
         # Failures here are warnings, except one: a comment that can't be updated would go on
         # showing an earlier push's diff as if it were current.
         set +e
         set -f  # ARGS is split on spaces, like a command line, but never glob-expanded.
-        if [ ! -f "$LOCK" ] && [ "$FETCHED" = true ] && [ "$BASE_HAS_LOCK" != true ]; then
-          echo "No lock file here or at the base commit; run \`permlang lock\` and commit it to get a permission diff."
-          exit 0
-        fi
         body="$RUNNER_TEMP/permlang-diff.md"
+        summary="$RUNNER_TEMP/permlang-summary.md"
+        rm -f "$summary"
         extra=()
         [ -n "$STRICTNESS" ] && extra+=(--strictness "$STRICTNESS")
         # The same files and settings as the check. When the diff fails, this still prints a
-        # comment that says so.
-        "$NODE" "$PERMLANG" diff "$BASE_SHA" $ARGS "${extra[@]}" --format markdown > "$body"
+        # comment that says so. The job summary takes far more than a comment: it gets the diff uncut.
+        "$NODE" "$PERMLANG" diff "$BASE_SHA" $ARGS "${extra[@]}" --format markdown --summary "$summary" > "$body"
         status=$?
-        if [ "$status" -ne 0 ]; then
+        # No lock file in the pull request or at its base: there's nothing to compare, so this
+        # only replaces an earlier comment of this run's, which would no longer apply.
+        no_lock=false
+        if [ "$(tail -n 1 "$body")" = "<!-- permlang-status: no-lock -->" ]; then
+          no_lock=true
+          echo "No lock file here or at the base commit; run \`permlang lock\` and commit it to get a permission diff."
+        elif [ "$status" -ne 0 ]; then
           echo "::warning::Couldn't compute the permission diff (see the error above). The comment says so."
         fi
         if [ ! -s "$body" ]; then
           echo "::warning::No permission diff to post."
           exit 0
         fi
-        cat "$body" >> "$GITHUB_STEP_SUMMARY"
+        # A check that stopped with an error (exit code 2, such as for an option it doesn't take
+        # that diff does) compared nothing, whatever the diff shows: the comment says so first,
+        # after its marker and heading.
+        if [ "$CHECK_EXIT" = 2 ] && [ "$no_lock" != true ]; then
+          stopped="> **PermLang's check stopped with an error**, so it compared nothing, and the pull request fails until that's fixed. The job log has the details. The diff below may not be what the check would find."
+          for file in "$body" "$summary"; do
+            [ -s "$file" ] || continue
+            { head -n 2 "$file"; printf '\n%s\n%s\n' '> [!CAUTION]' "$stopped"; tail -n +3 "$file"; } > "$file.tmp" && mv "$file.tmp" "$file"
+          done
+        fi
+        if [ -s "$summary" ]; then
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+        elif [ "$no_lock" != true ]; then
+          cat "$body" >> "$GITHUB_STEP_SUMMARY"
+        fi
 
         # A pull request from a fork gets a read-only token: the diff stays in the job summary.
         if [ "$HEAD_REPO" != "$REPO" ]; then
-          echo "::notice::Pull request from a fork: the permission diff is in the job summary."
+          [ "$no_lock" = true ] || echo "::notice::Pull request from a fork: the permission diff is in the job summary."
           exit 0
         fi
 
@@ -282,6 +295,7 @@ runs:
             break
           fi
         done <<< "$comments"
+        if [ "$no_lock" = true ] && [ -z "$existing" ]; then exit 0; fi
 
         # The body goes in a file: a long one doesn't fit on a command line.
         request="$RUNNER_TEMP/permlang-comment.json"

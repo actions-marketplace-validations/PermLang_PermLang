@@ -9,13 +9,12 @@ import { Node, ts, type Project, type SourceFile } from "ts-morph";
 import { AdapterError, AdapterIndex, loadAdapters } from "./adapters.js";
 import { UNVERIFIABLE, covers, formatCapability } from "./capability.js";
 import { detectInFile } from "./detect/index.js";
-import { isPrismaClientApi } from "./detect/prisma.js";
 import { Hierarchy } from "./dispatch.js";
 import { buildLock, lockDrift, type LockFile } from "./lock.js";
 import { moduleComments, strayPermTags, type AnnotationError } from "./annotations.js";
 import { projectFiles } from "./project-files.js";
 import { findTools, handlerReach } from "./tools.js";
-import { flowDiagnostics, type FlowRule } from "./flows.js";
+import { checkFlowTargets, flowDiagnostics, opaqueUses, type FlowRule } from "./flows.js";
 import { failureReason, projectOfFiles, projectOfTsConfig, unparsedReason } from "./load.js";
 import { clearResolutionCache, resolveAlias } from "./detect/shared.js";
 import { unmappedPackages, unresolvedImports, type UnmappedPackage } from "./unmapped.js";
@@ -24,6 +23,7 @@ import { forEachDescendant, lineAndColumn } from "./walk.js";
 import { collectEdges, holderOf, pathTo, propagate, type Edge, type GraphContext, type Reach } from "./graph.js";
 import {
   annotationComments,
+  createAnonymousUnit,
   createDeclaredUnit,
   createUnit,
   declaredCapabilities,
@@ -31,8 +31,9 @@ import {
   exportedDeclarations,
   isAnnotated,
   isInNodeModules,
+  isInside,
   isUnitNode,
-  ownDeclarationFiles,
+  PackageFolders,
   readModuleAnnotation,
   unitNodeForDeclaration,
   type Unit,
@@ -83,8 +84,11 @@ export interface FunctionReport {
   actual: string[];
   /** For each actual capability: the units on the way to it, then the call that uses it. */
   via: Record<string, string[]>;
-  /** For each actual capability: where in this function it's reached (a direct use, or the call leading to it). */
-  sites: Record<string, { line: number; column: number }>;
+  /**
+   * For each actual capability: where in this function it's reached (a direct use, or the call
+   * leading to it); in another file than `file` for the entry of code PermLang can't check.
+   */
+  sites: Record<string, { line: number; column: number; file?: string }>;
   /** A configuration file (a workflow, an Action, package.json) rather than code; see project-files.ts. */
   kind?: "config";
 }
@@ -118,6 +122,8 @@ export interface Report {
   unmapped: UnmappedPackage[];
   /** Imported modules whose types can't be found, so nothing called from them is checked. */
   unresolved: string[];
+  /** Where each of them is imported: the first import of each module (see unresolvedImports). */
+  unresolvedImports?: { specifier: string; file: string; line: number }[];
   /** Every function analyzed, including those that reach nothing (which `functions` leaves out). */
   units: {
     file: string;
@@ -198,17 +204,20 @@ export function checkTsConfig(tsConfigFilePath: string, options: CheckOptions = 
 }
 
 /**
- * @throws AdapterError when an adapter manifest is invalid.
+ * @throws AdapterError when an adapter manifest is invalid, and FlowRuleError when a flow rule lists an app capability no adapter defines.
  * @perm fs.read
  */
 export function checkProject(project: Project, options: CheckOptions = {}): Report {
   clearResolutionCache();
   const loaded = loadAdapters(options.adapters ?? []);
   if (loaded.errors.length > 0) throw new AdapterError(loaded.errors);
-  const adapters = new AdapterIndex(loaded.adapters);
+  const sourceFiles = project.getSourceFiles().filter((sf) => !sf.isDeclarationFile() && !isInNodeModules(sf));
+  // Folders with their own package.json: the project's own, and packages in its folders.
+  const packages = new PackageFolders(sourceFiles);
+  const adapters = new AdapterIndex(loaded.adapters, (declaration) => packages.localPackage(declaration)?.name);
+  if (options.flows) checkFlowTargets(options.flows, adapters.vocabulary);
   const strictness = options.strictness ?? "development";
 
-  const sourceFiles = project.getSourceFiles().filter((sf) => !sf.isDeclarationFile() && !isInNodeModules(sf));
   const units = new Map<Node, Unit>();
   const diagnostics: Diagnostic[] = [];
 
@@ -236,16 +245,30 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
   //    (Importing it isn't reported: there would be no way to accept that import.)
   const exported = groupBy([...units.values()].filter((u) => u.exported), (u) => u.node.getSourceFile());
   const declared = new Map<Node, Unit>();
-  const isOwnDeclarationFile = ownDeclarationFiles(sourceFiles);
   const declaredUnit = (node: Node): Unit | undefined => {
-    if (Node.isSourceFile(node) || !node.getSourceFile().isDeclarationFile() || !isOwnDeclarationFile(node.getSourceFile())) return undefined;
+    if (Node.isSourceFile(node) || !node.getSourceFile().isDeclarationFile() || !packages.isOwn(node.getSourceFile())) return undefined;
     if (unitNodeForDeclaration(node) !== node) return undefined; // not a value the project declares (an ambient package, a type)
-    if (isPrismaClientApi(node)) return undefined; // a generated Prisma client, which the Prisma detector reads
     if (!declared.has(node)) declared.set(node, createDeclaredUnit(node));
     return declared.get(node);
   };
+  //    A file that couldn't be analyzed has only its top-level unit, which stands for all of
+  //    its code: a call into any of its functions reaches it.
+  const unanalyzedUnit = (node: Node): Unit | undefined => {
+    const file = units.get(node.getSourceFile());
+    return file && unanalyzed.has(file) ? file : undefined;
+  };
+  //    An anonymous function that a call reaches through its type (a function kept in a Map,
+  //    say) gets a unit too: the part of the unit around it that's inside it.
+  const anonymous = new Map<Node, Unit>();
+  const anonymousUnit = (node: Node): Unit | undefined => {
+    if (!Node.isArrowFunction(node) && !Node.isFunctionExpression(node)) return undefined;
+    let unit = anonymous.get(node);
+    // (Every unit of a file that was analyzed is known; one that wasn't is handled above.)
+    if (!unit) anonymous.set(node, (unit = createAnonymousUnit(node, units.get(enclosingUnitNode(node))!)));
+    return unit;
+  };
   const context: GraphContext = {
-    unitOf: (node: Node) => units.get(node) ?? declaredUnit(node),
+    unitOf: (node: Node) => units.get(node) ?? declaredUnit(node) ?? unanalyzedUnit(node) ?? anonymousUnit(node),
     // Every analyzed file has one: its top-level code.
     exportedUnits: (file) => exported.get(file)!,
     hierarchy: new Hierarchy(sourceFiles),
@@ -257,8 +280,18 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
     if (reason !== undefined) unanalyzable(sf, reason);
     return found;
   });
-  const reach = propagate([...units.values(), ...declared.values()], edges);
+  // An anonymous function's calls are those of the unit around it made inside it.
+  const aroundEdges = groupBy(edges, (e) => e.from);
+  for (const unit of anonymous.values()) {
+    const inside = isInside(unit.node);
+    for (const edge of aroundEdges.get(unit.around!) ?? []) if (inside(edge)) edges.push({ ...edge, from: unit });
+  }
+  const all = [...units.values(), ...declared.values(), ...anonymous.values()];
+  const reach = propagate(all, edges);
   const edgesFrom = groupBy(edges, (e) => e.from);
+  // @perm-unsafe accepts a function's unverifiable code for annotations only. What a model's
+  // input can trigger, or where a protected secret can go, still includes it.
+  const unvouched = all.some((u) => u.own?.unsafe) ? propagate(all, edges, { vouched: false }) : reach;
 
   // 3. Compare declared with actual.
   const functions: FunctionReport[] = [];
@@ -278,11 +311,13 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
   unsafe.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
 
   // Packages with no adapter: listed always; a diagnostic unless trusted.
-  const unmappedUses = unmappedPackages(sourceFiles, adapters);
+  const unmappedUses = unmappedPackages(sourceFiles, adapters, packages);
   const policy = options.unmapped ?? "warn";
   if (policy !== "trust") {
     for (const u of unmappedUses) {
-      const unit = units.get(enclosingUnitNode(u.node))!;
+      // In a file that couldn't be analyzed, only its top-level code has a unit.
+      const unit = units.get(enclosingUnitNode(u.node)) ?? units.get(u.node.getSourceFile())!;
+      const counts = `${u.calls} call${u.calls === 1 ? "" : "s"} in ${u.files} file${u.files === 1 ? "" : "s"}`;
       diagnostics.push({
         severity: policy === "error" ? "error" : "warning",
         code: "PERM006",
@@ -292,8 +327,15 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
         function: unit.name,
         capability: u.package,
         call: "",
-        message: `${unit.name} calls into ${u.package} (${u.calls} call${u.calls === 1 ? "" : "s"} in ${u.files} file${u.files === 1 ? "" : "s"}), which has no adapter, so what it touches isn't checked.`,
-        fix: `add an adapter manifest for ${u.package}, or declare it pure with "default": [] (see docs/reference.md).`,
+        ...(u.folder === undefined
+          ? {
+              message: `${unit.name} calls into ${u.package} (${counts}), which has no adapter, so what it touches isn't checked.`,
+              fix: `add an adapter manifest for ${u.package}, or declare it pure with "default": [] (see docs/reference.md).`,
+            }
+          : {
+              message: `${unit.name} calls into ${u.package} (${counts}), the package in ${relativeFolder(u.file, u.folder)}, which has no adapter, so what its JavaScript touches isn't checked.`,
+              fix: `add an adapter manifest for ${u.package} to "adapters" in permlang.config.json, or declare it pure with "default": [] (see docs/reference.md). Built-in adapters don't cover a folder in the repository.`,
+            }),
       });
     }
   }
@@ -313,9 +355,7 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
         capability: u.specifier,
         call: "",
         message: `imports ${u.specifier}, whose types can't be found, so nothing called from it is checked.`,
-        fix: /^node:|^(fs|child_process|http|https|net|path|os|crypto)$/.test(u.specifier)
-          ? "install @types/node."
-          : `install its types (the package itself, or @types/${u.specifier.replace(/^@/, "").replace("/", "__")}).`,
+        fix: unresolvedFix(u.specifier),
       });
     }
   }
@@ -330,12 +370,14 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
       if (registered.has(t.site)) continue;
       registered.add(t.site);
       const registrar = units.get(enclosingUnitNode(t.site))!;
-      const reaches = [...handlerReach(t, { units, reach, edgesFrom })].sort();
+      const reaches = [...handlerReach(t, { units, reach: unvouched, edgesFrom })].sort();
       const file = t.site.getSourceFile();
       const { line, column } = file.getLineAndColumnAtPos(t.site.getStart());
       tools.push({ name: t.name, framework: t.framework, file: file.getFilePath(), line, function: registrar.name, reaches });
       const risky = reaches.filter(isRiskyForTools);
       if (toolPolicy === "trust" || risky.length === 0) continue;
+      // A collection of tools that can't be listed: say so, rather than name a tool called "*".
+      const unlisted = t.unlisted && t.name === "*";
       diagnostics.push({
         severity: toolPolicy === "error" ? "error" : "warning",
         code: "PERM008",
@@ -345,14 +387,23 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
         function: registrar.name,
         capability: t.name,
         call: "",
-        message: `tool ${t.name} (${t.framework}) can be called by an AI model, and reaches ${risky.join(", ")}.`,
-        fix: "anyone who controls the model's input can trigger it: limit what the tool can do, validate its arguments, or have a person confirm before it runs.",
+        message: unlisted
+          ? `tools given here (${t.framework}) can't all be listed, so what an AI model can trigger through them can't be checked.`
+          : `tool ${t.name} (${t.framework}) can be called by an AI model, and reaches ${risky.join(", ")}.`,
+        fix: unlisted
+          ? "write the tools out in the call, or in a constant it uses, so PermLang can follow each one; a tool a framework function makes (tool(...)) is followed where it's made."
+          : "anyone who controls the model's input can trigger it: limit what the tool can do, validate its arguments, or have a person confirm before it runs.",
       });
     }
   }
 
   // Data-flow rules: a function that reads protected data and can send it elsewhere.
-  if (options.flows && options.flows.length > 0) diagnostics.push(...flowDiagnostics(units.values(), edges, reach, options.flows));
+  // A package PermLang can't see into could send the data anywhere, so these rules also follow
+  // calls into packages with no adapter or no types. Only these rules: @perm and the lock don't.
+  if (options.flows && options.flows.length > 0) {
+    const flowReach = propagate(all, edges, { vouched: false, extraUses: opaqueUses(sourceFiles, adapters, packages, (node) => units.get(node)) });
+    diagnostics.push(...flowDiagnostics(units.values(), edges, flowReach, options.flows));
+  }
 
   // Sketch relaxes the annotation rules only. What the configuration asks for explicitly (flow
   // rules, and "error" for unmapped packages or AI tools) fails at every level.
@@ -363,7 +414,8 @@ export function checkProject(project: Project, options: CheckOptions = {}): Repo
     diagnostics: checked,
     unsafe,
     unmapped,
-    unresolved: unresolved.map((u) => u.specifier).sort(),
+    unresolved: [...new Set(unresolved.map((u) => u.specifier))].sort(),
+    unresolvedImports: unresolved.map(({ specifier, file, line }) => ({ specifier, file, line })),
     units: [...units.values()].map((u) => ({
       file: u.file,
       name: u.name,
@@ -559,9 +611,11 @@ function unverifiable(unit: Unit, site: Use | Edge, verb: string, path: string[]
 
 /**
  * How to resolve unverifiable code, naming something that can carry @perm-unsafe: never a
- * file's top-level code (a @module comment can't), and never a .d.ts declaration.
+ * file's top-level code (a @module comment can't), a .d.ts declaration, or an anonymous function.
  */
-function unverifiableFix(unit: Unit, holder: Unit): string {
+function unverifiableFix(unit: Unit, reached: Unit): string {
+  // An anonymous function's code is the unit around it's, which takes the annotation.
+  const holder = reached.around ?? reached;
   if (unanalyzed.has(holder)) return "simplify the file so PermLang can analyze it (split up its most deeply nested code, if that's the reason).";
   if (holder.declarationOnly) {
     const js = path.basename(holder.file).replace(/.d.([cm]?)ts$/, ".$1js");
@@ -606,6 +660,23 @@ function annotationFix(unit: Unit, key: string): string {
     return named ? `add /** @perm ${key} */ above class ${named}.` : `add a constructor to the class, with /** @perm ${key} */.`;
   }
   return `add /** @perm ${key} */ to ${unit.name}.`;
+}
+
+/** A folder as an import from `file` would name it: `./gen`, `../lib/client`. */
+function relativeFolder(file: string, folder: string): string {
+  const relative = path.relative(path.dirname(file), folder).replaceAll("\\", "/");
+  return relative.startsWith("../") || relative === ".." ? relative : `./${relative}`;
+}
+
+/** How to give an import whose types can't be found its types. */
+function unresolvedFix(specifier: string): string {
+  if (/^node:|^(fs|child_process|http|https|net|path|os|crypto)$/.test(specifier)) return "install @types/node.";
+  // A file of the project's: missing, or JavaScript with no types. Where imports compile to
+  // require(), a stylesheet or image is one too (see detect/modules.ts).
+  if (specifier.startsWith(".") || path.isAbsolute(specifier)) {
+    return "make sure the file exists and has types (a .ts file, or a .d.ts next to it). Where imports compile to require(), anything but a .json file that exists runs as JavaScript.";
+  }
+  return `install its types (the package itself, or @types/${specifier.replace(/^@/, "").replace("/", "__")}).`;
 }
 
 /** An @perm or @perm-unsafe tag that no function or file takes, so nothing checks it. */

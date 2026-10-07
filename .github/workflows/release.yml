@@ -16,7 +16,9 @@ on:
 permissions:
   contents: read
 
-# One release at a time: a second one waits instead of racing the first to npm.
+# One release at a time: a second one waits instead of racing the first to npm. GitHub keeps
+# only one waiting run per group, so a third release made while the second waits cancels the
+# second, which then has to be re-run (docs/releasing.md).
 concurrency:
   group: release
   cancel-in-progress: false
@@ -57,7 +59,10 @@ jobs:
           # Only reviewed code is released: the tag must point at a commit on main.
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then echo "::error::The release commit isn't on main. Create the release from main."; exit 1; fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - run: npm ci
+      # Without the dependencies' install scripts, which would run before the tarball is packed
+      # and could change it. None is needed: esbuild's (used by the tests) only checks and
+      # links the binary npm installs from its optional @esbuild/<platform> package.
+      - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
       - run: npm run build

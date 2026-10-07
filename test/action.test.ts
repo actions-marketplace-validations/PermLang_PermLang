@@ -10,6 +10,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
+import { removeTemporary } from "./temporary.js";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const action = parse(readFileSync(path.join(repo, "action.yml"), "utf8")) as { runs: { steps: { name: string; run?: string; with?: Record<string, string> }[] } };
@@ -44,7 +45,7 @@ beforeEach(() => {
   chmodSync(path.join(temp, "node"), 0o755);
 });
 
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
+afterEach(() => removeTemporary(dir));
 
 function git(...args: string[]): string {
   return execFileSync("git", args, { cwd: work, encoding: "utf8" }).trim();
@@ -102,27 +103,85 @@ describe.skipIf(!bash)("the Action's base-commit lookup", () => {
     return git("rev-parse", "HEAD");
   };
 
+  /** The base lookup, then the check, as the Action runs them; returns the check's exit code and output. */
+  const check = (args: string, sha: string, cwd = work) => {
+    const lookup = run("Look up the base commit", { BASE_SHA: sha }, cwd);
+    const result = run("Check permissions", { ARGS: args, BASE_SHA: sha, FETCHED: lookup.outputs.fetched!, STRICTNESS: "", SARIF: "false" }, cwd);
+    return { lookup, code: Number(result.outputs["exit-code"]), out: result.out };
+  };
+
   it("requires the lock when the base commit has one, even after the pull request deletes it", () => {
     permlang("init", "src");
     const sha = base();
+    expect(check("src", sha)).toMatchObject({ code: 0, lookup: { outputs: { fetched: "true", "sarif-category": "permlang" } } });
     rmSync(path.join(work, "permlang.lock.json"));
-    const { code, outputs } = run("Look up the base commit", { ARGS: "src", BASE_SHA: sha });
-    expect(code).toBe(0);
-    expect(outputs).toMatchObject({ lock: "permlang.lock.json", fetched: "true", "base-has-lock": "true", "require-lock": "true", "sarif-category": "permlang" });
+    const { code, out } = check("src", sha);
+    expect(code).toBe(1);
+    expect(out).toContain("permlang.lock.json is missing");
   });
 
-  it("follows --lock in the arguments, and doesn't require a lock the base doesn't have", () => {
+  // The Action used to find --lock in `args` itself, and a pull request could point it at a new
+  // lock file that approved its own access (found by the second verification, item 1).
+  it("fails a pull request that points the check at a lock file of its own", () => {
+    permlang("init", "src", "--workflow");
     const sha = base();
-    const { outputs } = run("Look up the base commit", { ARGS: "src --lock locks/custom.json", BASE_SHA: sha });
-    expect(outputs).toMatchObject({ lock: "locks/custom.json", fetched: "true", "base-has-lock": "false", "require-lock": "false" });
+    writeFileSync(path.join(work, "src", "app.ts"), 'export async function ping() {\n  return fetch("https://data-broker.example/");\n}\n');
+    const workflow = path.join(work, ".github", "workflows", "permlang.yml");
+    writeFileSync(workflow, readFileSync(workflow, "utf8").replace("args: src", "args: src --lock permlang.lock.v2.json"));
+    permlang("lock", "src", "--lock", "permlang.lock.v2.json");
+    const { code, out } = check("src --lock permlang.lock.v2.json", sha);
+    expect(code).toBe(1);
+    expect(out).toContain("This change stops checking with permlang.lock.json");
+  });
+
+  // `args` the check ignored used to pass it: help (`-h`), or an option meant for diff that hid
+  // the --lock after it (the second verification, B).
+  it.each(["src -h", "src --format --lock newdir", "src --head HEAD~1"])("fails the check on args %j, which it doesn't take", (args) => {
+    permlang("init", "src");
+    const sha = base();
+    expect(check(args, sha).code).toBe(2);
   });
 
   it("requires the lock, with a warning instead of a failure, when the base can't be fetched", () => {
+    permlang("init", "src");
     base();
-    const { code, out, outputs } = run("Look up the base commit", { ARGS: "src", BASE_SHA: "0".repeat(40) });
-    expect(code).toBe(0);
-    expect(out).toContain("::warning::Couldn't fetch the base commit");
-    expect(outputs).toMatchObject({ fetched: "false", "require-lock": "true" });
+    rmSync(path.join(work, "permlang.lock.json"));
+    const { lookup, code, out } = check("src", "0".repeat(40));
+    expect(lookup.code).toBe(0);
+    expect(lookup.out).toContain("::warning::Couldn't fetch the base commit");
+    expect(lookup.outputs).toMatchObject({ fetched: "false" });
+    expect(code).toBe(1);
+    expect(out).toContain("permlang.lock.json is missing");
+  });
+
+  // `git fetch --depth=1` made a full clone shallow (the second verification, item 6).
+  it("leaves a full clone whole, and fetches only the base commit into a shallow one", () => {
+    const first = base();
+    git("commit", "-q", "--allow-empty", "-m", "second");
+    git("push", "-q", "origin", "HEAD:refs/heads/main");
+    const clone = (name: string, ...options: string[]) => {
+      const to = path.join(dir, name);
+      execFileSync("git", ["clone", "-q", "-b", "main", ...options, pathToFileURL(origin).href, to]);
+      return to;
+    };
+    const full = clone("full");
+    const shallow = clone("shallow", "--depth=1");
+    // A base commit pushed after the clone was made, so even the full clone has to fetch it.
+    git("commit", "-q", "--allow-empty", "-m", "third");
+    git("push", "-q", "origin", "HEAD:refs/heads/main");
+    const later = git("rev-parse", "HEAD");
+    for (const [repo, sha, fetches, isShallow] of [
+      [full, first, false, "false"],
+      [full, later, true, "false"],
+      [shallow, first, true, "true"],
+    ] as const) {
+      const { code, out, outputs } = run("Look up the base commit", { BASE_SHA: sha }, repo);
+      expect(code).toBe(0);
+      expect(outputs.fetched).toBe("true");
+      expect(out.includes("FETCH_HEAD")).toBe(fetches);
+      expect(execFileSync("git", ["rev-parse", "--is-shallow-repository"], { cwd: repo, encoding: "utf8" }).trim()).toBe(isShallow);
+      expect(execFileSync("git", ["cat-file", "-t", sha], { cwd: repo, encoding: "utf8" }).trim()).toBe("commit");
+    }
   });
 
   it("gives each folder its own code-scanning category", () => {
@@ -165,9 +224,6 @@ describe.skipIf(!bash)("the Action's comment", () => {
     HEAD_REPO: "acme/app",
     ARGS: "src",
     STRICTNESS: "",
-    LOCK: "permlang.lock.json",
-    FETCHED: "true",
-    BASE_HAS_LOCK: "true",
     ...more,
   });
 
@@ -229,6 +285,19 @@ describe.skipIf(!bash)("the Action's comment", () => {
     expect(existsSync(path.join(temp, "gh.log"))).toBe(false);
   });
 
+  // `args: src --head HEAD~1` made the check stop with a usage error, while diff took --head and
+  // the comment said "No permission changes" (the second verification, B).
+  it("says first when the check itself stopped with an error", () => {
+    fakeGh({});
+    const { code, summary } = run("Comment the permission diff", env({ ARGS: "src --head HEAD", CHECK_EXIT: "2" }));
+    expect(code).toBe(0);
+    expect(sent("posted")).toMatch(/^<!-- permlang-diff -->\n### PermLang permission diff\n\n> \[!CAUTION\]\n> \*\*PermLang's check stopped with an error\*\*, so it compared nothing/);
+    expect(summary).toContain("PermLang's check stopped with an error");
+    rmSync(path.join(temp, "posted.json"));
+    run("Comment the permission diff", env({ CHECK_EXIT: "1" }));
+    expect(sent("posted")).not.toContain("stopped with an error");
+  });
+
   it("says when the pull request deletes the lock, instead of leaving quietly", () => {
     fakeGh({});
     rmSync(path.join(work, "permlang.lock.json"));
@@ -248,17 +317,47 @@ describe.skipIf(!bash)("the Action's comment", () => {
     fakeGh({});
     git("mv", "permlang.lock.json", "custom.json");
     git("commit", "-q", "-m", "custom lock");
-    expect(run("Comment the permission diff", env({ ARGS: "src --lock custom.json", LOCK: "custom.json", BASE_SHA: git("rev-parse", "HEAD") })).code).toBe(0);
+    expect(run("Comment the permission diff", env({ ARGS: "src --lock custom.json", BASE_SHA: git("rev-parse", "HEAD") })).code).toBe(0);
     expect(sent("posted")).toContain("<code>+ net(data-broker.example)</code>");
   });
 
-  it("does nothing when neither the pull request nor its base has a lock", () => {
+  it("posts nothing when neither the pull request nor its base has a lock", () => {
     fakeGh({});
     rmSync(path.join(work, "permlang.lock.json"));
-    const { code, out } = run("Comment the permission diff", env({ BASE_HAS_LOCK: "false" }));
+    git("rm", "-q", "permlang.lock.json");
+    git("commit", "-q", "-m", "no lock");
+    const { code, out, summary } = run("Comment the permission diff", env());
     expect(code).toBe(0);
     expect(out).toContain("No lock file here or at the base commit");
-    expect(existsSync(path.join(temp, "gh.log"))).toBe(false);
+    expect(out).not.toContain("::warning::");
+    expect(summary).toBe("");
+    expect(sent("posted")).toBeUndefined();
+  });
+
+  // An adoption pull request whose base has no lock posted a diff; a later push deleted the
+  // pull request's own lock, and that comment stayed up as if current (the second verification, F).
+  it("replaces its own earlier comment when there's no lock any more", () => {
+    fakeGh({ comments: ["103\tgithub-actions[bot]\t<!-- permlang-diff -->"] });
+    rmSync(path.join(work, "permlang.lock.json"));
+    git("rm", "-q", "permlang.lock.json");
+    git("commit", "-q", "-m", "no lock");
+    expect(run("Comment the permission diff", env()).code).toBe(0);
+    expect(sent("patched")).toContain("There's no <code>permlang.lock.json</code> in this pull request or at its base commit");
+    expect(sent("posted")).toBeUndefined();
+  });
+
+  // The job summary got the same body as the comment, cut to 60,000 bytes, while the comment said
+  // the summary had the full diff (the second verification, item 2 and A(c)).
+  it("puts the whole diff in the job summary when the comment is cut short", () => {
+    fakeGh({});
+    const many = Array.from({ length: 600 }, (_, i) => `export async function f${i}() {\n  return fetch("https://host-${i}-${"x".repeat(60)}.example/");\n}\n`).join("");
+    writeFileSync(path.join(work, "src", "app.ts"), many);
+    const { code, summary } = run("Comment the permission diff", env());
+    expect(code).toBe(0);
+    expect(sent("posted")).toMatch(/Cut short/);
+    expect(sent("posted")!.length).toBeLessThan(60_000);
+    expect(summary).not.toMatch(/Cut short/);
+    expect(summary).toContain(`net(host-599-${"x".repeat(60)}.example)`);
   });
 });
 
@@ -276,5 +375,17 @@ describe("the Action's setup", () => {
   // On Windows, Git Bash's /d/a/... path named a folder that doesn't exist (A8).
   it("gives the build cache a Windows path on Windows", () => {
     expect(script("Compute build cache key")).toContain('cygpath -m "$(pwd -P)"');
+  });
+});
+
+describe("the release workflow", () => {
+  // Dependencies' install scripts ran in the job that packs the tarball, which is then attested
+  // and published, and could change it (the second verification, item 8).
+  it("installs without running dependencies' install scripts, as the Action builds itself", () => {
+    const release = parse(readFileSync(path.join(repo, ".github", "workflows", "release.yml"), "utf8")) as { jobs: Record<string, { steps: { run?: string }[] }> };
+    const installs = Object.values(release.jobs).flatMap((job) => job.steps.map((s) => s.run ?? "").filter((run) => /\bnpm (ci|install)\b/.test(run)));
+    expect(installs).not.toHaveLength(0);
+    for (const run of installs) expect(run).toContain("--ignore-scripts");
+    expect(script("Build PermLang")).toContain("npm ci --ignore-scripts");
   });
 });

@@ -79,8 +79,9 @@ const READS = new Set([
   "readdir", "stat", "lstat", "statfs", "exists", "access",
   "watch", "watchFile", "unwatchFile", "realpath", "readlink", "opendir", "glob", "openAsBlob",
 ]);
-// Reads, unless an options argument's `flag` (readFile) or `flags` (createReadStream) opens the file for writing.
-const FLAGGED_READS = new Set(["readFile", "createReadStream"]);
+// Reads, unless the option that sets the flags (readFile's `flag`, createReadStream's and
+// ReadStream's `flags`; Node ignores the other name) opens the file for writing.
+const FLAGGED_READS = new Map([["readFile", "flag"], ["createReadStream", "flags"]]);
 // Source is read, destination is written.
 const COPIES = new Set(["copyFile", "cp"]);
 // Every path argument is written.
@@ -100,7 +101,8 @@ export function fsCapabilities(fn: string, args: readonly Node[]): Capability[] 
   if (FD_METADATA.has(base)) return [{ name: "fs.write", dynamic: true }];
   if (READS.has(base)) return [read(0)];
   // Used as a value, it could be called with any flags.
-  if (FLAGGED_READS.has(base)) return flagCapabilities(args.length === 0 ? undefined : optionFlags(args[1]), read(0), write(0));
+  const flagOption = FLAGGED_READS.get(base);
+  if (flagOption) return flagCapabilities(args.length === 0 ? undefined : optionFlags(args[1], flagOption), read(0), write(0));
   if (base === "Utf8Stream") return utf8StreamCapabilities(args[0]);
   if (COPIES.has(base)) return [read(0), write(1)];
   if (TWO_PATH_WRITES.has(base)) return [write(0), write(1)];
@@ -127,23 +129,20 @@ function flagCapabilities(flags: string | undefined, read: Capability, write: Ca
 }
 
 /**
- * The flags an options argument opens a file with: readFile's `flag`, createReadStream's `flags`.
- * "r" when it can't set any (an encoding string, or a type without them); undefined when they
- * can't be known.
+ * The flags an options argument opens a file with, read from `name`: readFile's `flag`, or a
+ * stream's `flags` (Node reads only that one, and ignores the other). "r" when it can't set it
+ * (an encoding string, or a type without it); undefined when it can't be known.
  */
-function optionFlags(options: Node | undefined): string | undefined {
+function optionFlags(options: Node | undefined, name: string): string | undefined {
   if (!options) return "r";
   if (Node.isObjectLiteralExpression(options)) {
-    for (const name of ["flag", "flags"]) {
-      const value = propertyValue(options, name);
-      if (value === "unknown") return undefined;
-      if (value !== "absent") return literalString(value);
-    }
-    return "r";
+    const value = propertyValue(options, name);
+    if (value === "unknown") return undefined;
+    return value === "absent" ? "r" : literalString(value);
   }
   const type = options.getType();
   if (type.isAny() || type.isUnknown()) return undefined;
-  const mayHaveFlags = (t: Type) => t.getProperty("flag") !== undefined || t.getProperty("flags") !== undefined || t.getStringIndexType() !== undefined;
+  const mayHaveFlags = (t: Type) => t.getProperty(name) !== undefined || t.getStringIndexType() !== undefined;
   return (type.isUnion() ? type.getUnionTypes() : [type]).some(mayHaveFlags) ? undefined : "r";
 }
 

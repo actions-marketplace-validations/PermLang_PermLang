@@ -5,7 +5,7 @@
 // and workflow files the review gate relies on.
 
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import fc from "fast-check";
@@ -19,6 +19,7 @@ import { COMMENT_LIMIT, formatDiffMarkdown } from "../src/diff.js";
 import { diffLocks, LockError, parseLock, serializeLock, type LockFile } from "../src/lock.js";
 import { projectFiles } from "../src/project-files.js";
 import { formatAnnotations, printable, toSarif } from "../src/report.js";
+import { removeTemporary } from "./temporary.js";
 
 /** Anything at all, mixed with the characters that escaping and parsing have to handle. */
 const hostile = fc.oneof(
@@ -50,12 +51,21 @@ describe("output for GitHub", () => {
   /** How the Actions runner decodes a workflow command's values. */
   const unescape = (s: string) => s.replace(/%(25|0D|0A|3A|2C)/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)));
 
+  // Code text is shown as the text report shows it: with escapes for line breaks, control
+  // characters, and bidirectional overrides, apart from PermLang's own break before a reason.
+  const shown = (message: string) => {
+    const own = /\n[ \t]*(?=but |which )/.exec(message);
+    return own ? `${printable(message.slice(0, own.index))}\n${printable(message.slice(own.index + own[0].length))}` : printable(message);
+  };
+  const unprintable = new RegExp("[\\u0000-\\u0009\\u000b-\\u001f\\u007f-\\u009f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069]");
+
   it("writes one workflow command per diagnostic, which decodes back to exactly its text", () => {
     fc.assert(
       fc.property(fc.array(item, { maxLength: 5 }), (items) => {
         const out = formatAnnotations(report(items.map((i) => i.d)), root);
-        // A raw line break would let code text start a command of its own.
-        expect(out).not.toContain("\r");
+        // A raw line break would let code text start a command of its own, and an escape
+        // sequence or bidirectional override would reach the log as it is.
+        expect(out).not.toMatch(unprintable);
         const lines = out === "" ? [] : out.split("\n");
         expect(lines).toHaveLength(items.length);
         const ordered = [...items.filter((i) => i.d.severity === "error"), ...items.filter((i) => i.d.severity === "warning")];
@@ -65,9 +75,8 @@ describe("output for GitHub", () => {
           expect(m).not.toBeNull();
           const [, severity, f, l, c, title, message] = m!;
           expect([severity, unescape(f!), Number(l), Number(c)]).toEqual([d.severity, file, d.line, d.column]);
-          expect(unescape(title!)).toBe(`PermLang ${d.code}${d.capability ? `: ${d.capability}` : ""}`);
-          const lines = d.message.split("\n").map((s) => s.trim());
-          expect(unescape(message!)).toBe(lines.join("\n") + (d.fix ? `\n-> ${d.fix}` : ""));
+          expect(unescape(title!)).toBe(`PermLang ${d.code}${d.capability ? `: ${printable(d.capability)}` : ""}`);
+          expect(unescape(message!)).toBe(shown(d.message) + (d.fix ? `\n-> ${printable(d.fix)}` : ""));
         });
       }),
     );
@@ -181,11 +190,26 @@ describe("capabilities", () => {
     );
   });
 
+  // A network path read as Windows does: the first two names are the server and the share, as
+  // written, and `..` can't climb above the share.
+  const inShare = (p: string) => {
+    const [server = "", share = "", ...rest] = p.split(/[\\/]/).filter((s) => s !== "");
+    const below = path.posix.normalize(`/${rest.join("/")}`).split("/").filter((s) => s !== "" && s !== ".");
+    return [server, share, ...below].slice(0, share === "" ? 1 : undefined);
+  };
+  const insideShare = (declared: string, used: string) => {
+    const [d, u] = [inShare(declared), inShare(used)];
+    return d.length <= u.length && d.every((s, i) => u[i] === s);
+  };
+
   it("keeps Windows network shares and drive-relative paths under their own root", () => {
     // `\\server\share\x` is absolute, but not under `/`; `C:x` is relative to drive C's own working directory.
+    // A network path is covered only when it's inside under both readings: as a plain path (as on
+    // other systems, where `//server/share/../x` is `/server/x`) and as Windows reads a share.
+    const network = (d: string, u: string) => inside(`/${d}`, `/${u}`) && insideShare(d, u);
     const roots: [string, (d: string, u: string) => boolean][] = [
-      ["\\\\", (d, u) => inside(`/${d}`, `/${u}`)],
-      ["//", (d, u) => inside(`/${d}`, `/${u}`)],
+      ["\\\\", network],
+      ["//", network],
       ["C:", inside],
     ];
     fc.assert(
@@ -196,6 +220,24 @@ describe("capabilities", () => {
         }
       }),
       { numRuns: 500 },
+    );
+  });
+
+  // Checked against Node's own reading of Windows paths: whatever a share's path does with `..`,
+  // a declaration covers it only if Windows puts it inside the declared folder.
+  it("never lets `..` climb out of a Windows network share", () => {
+    const name = fc.stringMatching(/^[a-z]{1,3}$/);
+    const win = (p: string) => path.win32.normalize(p).toLowerCase().replace(/\\$/, "");
+    fc.assert(
+      fc.property(name, name, name, relativePath, relativePath, (server, share, other, declared, used) => {
+        const declaredPath = `\\\\${server}\\${other}\\${declared}`;
+        const usedPath = `\\\\${server}\\${share}\\${used}`;
+        if (covers([{ name: "fs.write", arg: declaredPath }], { name: "fs.write", arg: usedPath })) {
+          const [d, u] = [win(declaredPath), win(usedPath)];
+          expect(u === d || u.startsWith(`${d}\\`)).toBe(true);
+        }
+      }),
+      { numRuns: 1000 },
     );
   });
 });
@@ -309,6 +351,66 @@ describe("SQL table reader", () => {
       fc.property(hiding, (sql) => {
         const tables = sqlTables(sql);
         if (tables) expect(tables.read, sql).toContain("secrets");
+      }),
+      { numRuns: 3000 },
+    );
+  });
+
+  // Placeholders and names glued to the text around them, which the dialects split into
+  // tokens differently: MySQL and SQLite read `?FROM` as `?` and FROM, and SQLite reads
+  // `:a('x)` as one variable and `[']` as one name. Each shape reads secrets in at least one.
+  const glued = fc.oneof(
+    fc
+      .tuple(
+        fc.constantFrom("?", "?1", "?12", "$1", ":1"),
+        fc.constantFrom<(p: string) => string>(
+          (p) => `SELECT name, ${p}FROM secrets`,
+          (p) => `INSERT INTO leads (name) SELECT ${p}FROM secrets`,
+          (p) => `SELECT * FROM leads WHERE id IN (SELECT ${p}FROM secrets)`,
+        ),
+      )
+      .map(([p, at]) => at(p)),
+    fc
+      .tuple(fc.constantFrom(":a", "@a", "$1", ":1", ":a::b", ":a::", "$1::1lower", "$1::numeric"), fc.constantFrom("'", '"', "`", "["))
+      .map(([v, q]) => `SELECT ${v}(${q}x) FROM secrets --${q === "[" ? "]" : q})`),
+    fc.constantFrom("'", '"', "`", "--", "/*", "/* */ '").map((q) => `SELECT [${q}] FROM secrets -- ${q}] FROM leads`),
+  );
+
+  it("never names fewer tables than a query reads, whatever a placeholder or name is glued to", () => {
+    fc.assert(
+      fc.property(glued, (sql) => {
+        const tables = sqlTables(sql);
+        if (tables) expect(tables.read, sql).toContain("secrets");
+      }),
+      { numRuns: 500 },
+    );
+  });
+
+  // mysql2's query() pastes each value, escaped, at a `?` (older versions at every one, in
+  // strings and comments too). A value can't add a table the reader didn't name.
+  it("never names fewer tables than a query reads once the client pastes values in", () => {
+    const holder = fc.constantFrom("?", "'?'", "`?`", '"?"', "'a ? b'", "/* ? */ 1", "1 -- ?\n", "'?', ?", "lower('?')");
+    const statement = fc.constantFrom<(h: string) => string>(
+      (h) => `SELECT ${h} FROM leads`,
+      (h) => `SELECT * FROM leads WHERE id = 1 AND ${h} = 1`,
+      (h) => `UPDATE leads SET a = ${h} WHERE id = 1`,
+      (h) => `INSERT INTO leads (a) VALUES (${h})`,
+    );
+    const text = fc.oneof(
+      fc.tuple(statement, holder).map(([at, h]) => at(h)),
+      fc.string({
+        unit: fc.constantFrom("SELECT ", "a ", "FROM leads ", "WHERE x = ", "?", "'", "`", '"', "/* ", " */", "-- ", "\n", ", ", "(", ")"),
+        maxLength: 14,
+      }),
+    );
+    // Each escapes to itself in quotes: sqlstring changes only quotes, backslashes, and control characters.
+    const hostile = fc.constantFrom("x FROM secrets -- ", "x` FROM secrets -- ", "*/ , (SELECT 1 FROM secrets) /*", ") , (SELECT 1 FROM secrets) -- ");
+    fc.assert(
+      fc.property(text, hostile, (sql, value) => {
+        const tables = sqlTables(sql, { formatted: true });
+        if (!tables) return;
+        const sent = sqlTables(sql.replace(/\?+/g, (m) => (m.length === 1 ? `'${value}'` : m)));
+        if (sent) for (const t of sent.read) expect(tables.read, sql).toContain(t);
       }),
       { numRuns: 3000 },
     );
@@ -472,7 +574,7 @@ describe("project configuration", () => {
     dir = mkdtempSync(path.join(tmpdir(), "permlang-properties-"));
     mkdirSync(path.join(dir, ".github", "workflows"), { recursive: true });
   });
-  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  afterAll(() => removeTemporary(dir));
   const inventory = (file: string, text: string) => {
     writeFileSync(path.join(dir, file), text);
     return projectFiles(dir).find((e) => e.name === `<${path.basename(file)}>`);

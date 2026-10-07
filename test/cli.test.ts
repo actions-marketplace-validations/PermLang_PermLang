@@ -7,7 +7,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { parseArgs } from "../src/args.js";
 import { runCli } from "./run-cli.js";
+import { removeTemporary } from "./temporary.js";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
 
@@ -30,7 +32,7 @@ beforeEach(() => {
   git("config", "user.name", "Test");
 });
 
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
+afterEach(() => removeTemporary(dir));
 
 describe("permlang diff", () => {
   it("analyzes the given paths, not ./src", () => {
@@ -102,6 +104,8 @@ describe("permlang diff --head", () => {
     const { code, out } = permlang("diff", "HEAD", "my lib", "--head", "HEAD");
     expect(code).toBe(0);
     expect(out).toContain("No permission changes");
+    // Comparing two commits, nothing is said about the working tree's workflows, but the field is there.
+    expect(JSON.parse(permlang("diff", "HEAD", "my lib", "--head", "HEAD", "--json").out)).toMatchObject({ head: "HEAD", lockMoved: [], lockDeleted: false });
   });
 
   it("says so when the lock doesn't exist at that commit", () => {
@@ -200,19 +204,35 @@ describe("permlang spec", () => {
     write("svc/ping.perm", spec("net(api.example.com)"));
     const { code, out } = permlang("spec", "svc");
     expect(code).toBe(1);
-    expect(out).toContain("perms     unchecked: reaches code whose types can't be found");
+    expect(out).toContain("perms     unchecked: reaches code PermLang can't see");
     expect(out).toContain(
       "error SPEC005: perm ping: ping reaches code PermLang can't see, so its permissions can't be checked: it calls into untyped-pinger, whose types can't be found.\n    -> install the missing types",
     );
   });
 
+  // A spec that can't be parsed exits 2: 1 means permission errors and nothing else (the second
+  // verification).
   it("reports a spec with no implementation, and one that can't be parsed", () => {
     write("svc/ping.perm", spec("net(api.example.com)", ""));
     write("svc/bad.perm", "perm broken(\n");
     const { code, out } = permlang("spec", "svc");
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(out).toMatch(/svc\/bad\.perm:1 error SPEC001/);
     expect(out).toContain("implementation not found");
+  });
+
+  // Capabilities from the code went into spec's output unescaped, so a path in a string could
+  // print `::stop-commands::` on a line of its own (the second verification, item 5).
+  it("escapes text from the code, so it can't print a line of its own", () => {
+    // Just enough of @types/node for process.env: this temporary repository has no node_modules.
+    write("svc/node.d.ts", "declare var process: { env: { [key: string]: string | undefined } };\n");
+    write("svc/ping.ts", 'export function ping() {\n  return process.env["X\\n::stop-commands::pwned\\n\\u001b[31m\\u202e"];\n}\n');
+    write("svc/ping.perm", spec("net(api.example.com)"));
+    const { code, out } = permlang("spec", "svc");
+    expect(code).toBe(1);
+    expect(out).toContain("FAIL: reaches env(X\\n::stop-commands::pwned\\n\\u001b[31m\\u202e)");
+    expect(out).not.toMatch(/^::/m);
+    expect(out).not.toMatch(new RegExp("[\\u001b\\u202e]"));
   });
 
   it("prints JSON, checks only the specs it's given, and says when there are none", () => {
@@ -248,6 +268,123 @@ describe("usage errors", () => {
   });
 });
 
+// The Action passes its `args` to check and to diff. Options either command ignored let a workflow
+// change what the comment compares (`--head`), or print help and pass (`-h`), without the check
+// failing (found by the second verification, B; and `check --format json`, `lock --sarif`).
+describe("options a command doesn't take", () => {
+  it.each([
+    [["check", "my lib", "-h"], /^-h goes on its own: `permlang check --help`\./],
+    [["check", "--help", "my lib"], /^--help goes on its own/],
+    [["check", "my lib", "--format", "json"], /^check takes --json, not --format: `permlang check --json`\./],
+    [["spec", "--format", "json"], /^spec takes --json, not --format/],
+    [["check", "my lib", "--head", "HEAD~1"], /^check doesn't take --head: it's an option of diff\./],
+    [["check", "my lib", "--summary", "x.md"], /^check doesn't take --summary: it's an option of diff\./],
+    [["lock", "my lib", "--sarif", "x.sarif"], /^lock doesn't take --sarif: it's an option of check\./],
+    [["lock", "my lib", "--no-lock"], /^lock doesn't take --no-lock: it's an option of check and diff\./],
+    [["init", "my lib", "--json"], /^init doesn't take --json: it's an option of check, diff and spec\./],
+    [["check", "my lib", "--workflow"], /^check doesn't take --workflow: it's an option of init\./],
+    [["diff", "HEAD", "--base", "HEAD"], /^diff takes the base commit as its first argument, not --base/],
+    [["diff", "HEAD", "--spec", "a.perm"], /^diff doesn't take --spec: it's an option of spec\./],
+    // A value that's another option would hide it: `--format --lock newdir`.
+    [["check", "my lib", "--lock", "--no-lock"], /^--lock needs a value, not the option "--no-lock"\./],
+    [["diff", "HEAD", "--format", "--lock", "x"], /^--format needs a value, not the option "--lock"\./],
+    [["check", "my lib", "--frob"], /^Unknown option "--frob"/],
+    [["frob", "--help"], /^Unknown command "frob"/],
+  ])("exits 2 on %j", (args, message) => {
+    const { code, out } = permlang(...args);
+    expect(code).toBe(2);
+    expect(out).toMatch(message);
+  });
+
+  it("lets diff take check's options, so the Action can pass it the same arguments", () => {
+    permlang("lock", "my lib");
+    git("add", "-A");
+    git("commit", "-q", "-m", "base");
+    const { code, out } = permlang("diff", "HEAD", "my lib", "--require-lock", "--github-annotations", "--sarif", "unused.sarif", "--format", "markdown");
+    expect(code).toBe(0);
+    expect(out).toContain("No permission changes.");
+    // --json is diff's --format json, and an explicit --format wins (the Action adds one after its args).
+    expect(JSON.parse(permlang("diff", "HEAD", "my lib", "--json").out)).toMatchObject({ base: "HEAD", functions: [] });
+    expect(permlang("diff", "HEAD", "my lib", "--json", "--format", "markdown").out).toMatch(/^<!-- permlang-diff -->/);
+  });
+
+  it("still prints a comment when diff's arguments are wrong, to replace the Action's earlier one", () => {
+    const { code, out } = permlang("diff", "HEAD", "--workflow", "--format", "markdown");
+    expect(code).toBe(2);
+    expect(out).toMatch(/^<!-- permlang-diff -->\n### PermLang permission diff\n\n> \[!CAUTION\]\n> \*\*PermLang couldn't compute the permission diff\*\*.*diff doesn't take --workflow/);
+  });
+
+  it("prints the no-lock notice, which the Action recognizes, when neither commit has a lock file", () => {
+    git("commit", "-q", "--allow-empty", "-m", "empty");
+    const { code, out } = permlang("diff", "HEAD", "my lib", "--format", "markdown");
+    expect(code).toBe(2);
+    expect(out).toMatch(/^<!-- permlang-diff -->\n### PermLang permission diff\n\nThere's no <code>permlang\.lock\.json<\/code> in this pull request or at its base commit/);
+    expect(out).toContain("<!-- permlang-status: no-lock -->\nNo permlang.lock.json. Run `permlang lock` first.");
+    // In text there's only the error.
+    expect(permlang("diff", "HEAD", "my lib")).toEqual({ code: 2, out: "No permlang.lock.json. Run `permlang lock` first.\n" });
+  });
+});
+
+describe("each option", () => {
+  it("sets what it names, and repeats where it can", () => {
+    const diff = ["HEAD", "src", "--project", "a.json", "--config", "c.json", "--adapter", "x.json", "--adapter", "y.json", "--strictness", "sketch", "--unmapped", "trust", "--lock", "l.json"];
+    const flags = ["--no-lock", "--require-lock", "--json", "--github-annotations", "--sarif", "s.sarif", "--head", "h", "--format", "markdown", "--summary", "s.md"];
+    expect(parseArgs("diff", [...diff, ...flags])).toEqual({
+      paths: ["HEAD", "src"],
+      project: "a.json",
+      config: "c.json",
+      adapters: ["x.json", "y.json"],
+      strictness: "sketch",
+      unmapped: "trust",
+      lock: "l.json",
+      noLock: true,
+      requireLock: true,
+      json: true,
+      githubAnnotations: true,
+      sarif: "s.sarif",
+      head: "h",
+      format: "markdown",
+      summary: "s.md",
+      workflow: false,
+      specs: [],
+    });
+    expect(parseArgs("check", ["-p", "t.json", "--base", "b"])).toMatchObject({ project: "t.json", base: "b", paths: [] });
+    expect(parseArgs("spec", ["--spec", "a.perm", "--spec", "b.perm"]).specs).toEqual(["a.perm", "b.perm"]);
+    expect(parseArgs("init", ["--workflow"]).workflow).toBe(true);
+  });
+
+  it("-p is --project", () => {
+    write("tsconfig.app.json", JSON.stringify({ include: ["my lib"] }));
+    expect(permlang("check", "-p", "tsconfig.app.json", "--no-lock", "--json").out).toBe(permlang("check", "--project", "tsconfig.app.json", "--no-lock", "--json").out);
+  });
+});
+
+// The Action puts the diff in the job summary uncut, where GitHub takes far more than in a comment.
+describe("permlang diff --summary", () => {
+  it("also writes the markdown diff, uncut, to the file it names", () => {
+    permlang("lock", "my lib");
+    git("add", "-A");
+    git("commit", "-q", "-m", "base");
+    const many = Array.from({ length: 600 }, (_, i) => `export async function f${i}() {\n  return fetch("https://host-${i}-${"x".repeat(60)}.example/");\n}\n`).join("");
+    writeFileSync(path.join(dir, "my lib", "app.ts"), many);
+    const { code, out } = permlang("diff", "HEAD", "my lib", "--format", "markdown", "--summary", "summary.md");
+    expect(code).toBe(0);
+    expect(out).toMatch(/Cut short/);
+    const summary = readFileSync(path.join(dir, "summary.md"), "utf8");
+    expect(summary).toMatch(/^<!-- permlang-diff -->\n### PermLang permission diff\n/);
+    expect(summary).not.toMatch(/Cut short/);
+    expect(summary.split("\n").filter((l) => l.startsWith("| <code>+ net("))).toHaveLength(600);
+    // Whatever the output format.
+    expect(permlang("diff", "HEAD", "my lib", "--json", "--summary", "summary2.md").code).toBe(0);
+    expect(readFileSync(path.join(dir, "summary2.md"), "utf8")).toBe(summary);
+  });
+
+  it("is an option of diff alone, and needs a file", () => {
+    expect(permlang("check", "my lib", "--summary", "s.md")).toMatchObject({ code: 2, out: expect.stringMatching(/^check doesn't take --summary: it's an option of diff\./) });
+    expect(permlang("diff", "HEAD", "--summary")).toMatchObject({ code: 2, out: expect.stringMatching(/^--summary needs a value\./) });
+  });
+});
+
 describe("configuration errors", () => {
   it("exits 2 on a config file that isn't an object", () => {
     writeFileSync(path.join(dir, "permlang.config.json"), "null\n");
@@ -267,6 +404,19 @@ describe("configuration errors", () => {
     const { code, out } = permlang("check", "my lib");
     expect(code).toBe(2);
     expect(out).toMatch(message);
+  });
+
+  // Field and capability names from an adapter manifest went into the error raw, so a manifest
+  // could print `::stop-commands::` on a line of its own (the second verification, item 5).
+  it("escapes what an invalid adapter manifest says, so it can't print a line of its own", () => {
+    const evil = "x\n::stop-commands::pwned\n::error::FAKE";
+    writeFileSync(path.join(dir, "acme.json"), JSON.stringify({ permlang: 1, package: "acme", [evil]: 1, defines: [`acme.${evil}`], functions: { [evil]: [`acme.${evil}`] } }));
+    const { code, out } = permlang("check", "my lib", "--adapter", "acme.json", "--no-lock");
+    expect(code).toBe(2);
+    expect(out).toContain('unknown field "x\\n::stop-commands::pwned\\n::error::FAKE"');
+    expect(out).toContain('invalid capability name "acme.x\\n::stop-commands::pwned\\n::error::FAKE"');
+    expect(out).toContain('functions["x\\n::stop-commands::pwned\\n::error::FAKE"]');
+    expect(out).not.toMatch(/^::/m);
   });
 });
 
@@ -294,6 +444,13 @@ describe("data-flow rules", () => {
     const { code, out } = permlang("check", "my lib", "--no-lock");
     expect(code).toBe(2);
     expect(out).toContain('flows[0]: "to" must be a list of capabilities');
+  });
+
+  it("rejects an app capability no adapter defines, once the adapters are loaded", () => {
+    writeFileSync(path.join(dir, "permlang.config.json"), JSON.stringify({ flows: [{ from: "env(API_KEY)", to: ["email.sent"] }] }));
+    const { code, out } = permlang("check", "my lib", "--no-lock");
+    expect(code).toBe(2);
+    expect(out).toContain('permlang.config.json: flows[0]: "to" lists email.sent, which no adapter defines, so it could never match.');
   });
 });
 

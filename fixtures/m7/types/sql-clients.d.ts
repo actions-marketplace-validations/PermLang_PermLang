@@ -19,8 +19,19 @@ declare module "mysql2/promise" {
     query(sql: string, values?: unknown[]): Promise<unknown>;
     query(options: { sql: string; values?: unknown[] }): Promise<unknown>;
     execute(sql: string, values?: unknown[]): Promise<unknown>;
+    prepare(sql: string): Promise<PreparedStatementInfo>;
+  }
+  // A prepared statement runs the SQL prepare() was given, with its values bound.
+  export interface PreparedStatementInfo {
+    close(): Promise<void>;
+    execute(parameters: unknown): Promise<unknown>;
   }
   export function createPool(uri: string): Pool;
+  export interface Connection {
+    query(sql: string, values?: unknown[]): Promise<unknown>;
+    end(): Promise<void>;
+  }
+  export function createConnection(uri: string): Promise<Connection>;
 }
 
 declare module "better-sqlite3" {
@@ -38,6 +49,28 @@ declare module "better-sqlite3" {
     close(): this;
   }
   export default Database;
+}
+
+// sqlite3 5: Database's run/all/get/exec take SQL; its Statement's run/all/get run what
+// prepare() was given.
+declare module "sqlite3" {
+  export class Statement {
+    bind(...params: unknown[]): this;
+    run(...params: unknown[]): this;
+    all(...params: unknown[]): this;
+    get(...params: unknown[]): this;
+    finalize(): Database;
+  }
+  export class Database {
+    constructor(filename: string);
+    run(sql: string, ...params: unknown[]): this;
+    all(sql: string, ...params: unknown[]): this;
+    get(sql: string, ...params: unknown[]): this;
+    exec(sql: string): this;
+    prepare(sql: string, ...params: unknown[]): Statement;
+    loadExtension(filename: string): this;
+    close(): void;
+  }
 }
 
 declare module "mysql2" {

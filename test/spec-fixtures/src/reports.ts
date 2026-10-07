@@ -22,3 +22,16 @@ export class Settings {
     execSync("defaults write theme " + value);
   }
 }
+
+// A top-level function, and one nested in another with the same name: the plain name means the
+// top-level one.
+export function make() {
+  return fetch("https://api.example.com/make");
+}
+
+export function outer() {
+  function make() {
+    execSync("make");
+  }
+  return make();
+}
