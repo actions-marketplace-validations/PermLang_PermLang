@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // GitHub workflows and Actions: what each file grants, read where GitHub reads it.
 // Triggers, token permissions, Actions (`uses:` on steps and on jobs that call a
 // reusable workflow), container images, and `secrets: inherit` are read from their

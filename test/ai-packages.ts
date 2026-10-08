@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // AI framework packages for test/tools.test.ts, laid out the way npm publishes them: the
 // file structure, re-exports, bundler-renamed declarations, and overloads that decide
 // where TypeScript resolves a call. Only the declarations the tests use are kept. A

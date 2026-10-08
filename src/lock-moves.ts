@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 /**
  * Which lock files the PermLang Action's steps read, in a commit's workflows and in the working
  * tree. A change that points the Action at another lock file (`args: --lock other.json`, or
@@ -37,7 +40,9 @@ export function movedLocks(base: string, lockFile: string | undefined): string[]
   const dir = path.join(root, ".github", "workflows");
   const here: Reader = (file) => (existsSync(path.join(root, file)) ? readFileSync(path.join(root, file), "utf8") : undefined);
   const headFiles = existsSync(dir) ? readdirSync(dir).map((f) => `.github/workflows/${f}`).filter(isWorkflow) : [];
-  const stillRead = locksRead(headFiles, here);
+  // Only a step that's sure to run, and to fail its job when it fails, still checks with a lock:
+  // a pull request could otherwise add one that never runs, as a decoy.
+  const stillRead = locksRead(headFiles, here, { surelyRuns: true });
   return [...read].filter((lock) => !stillRead.has(lock) && gitText(root, "cat-file", "-e", `${base}:${lock}`) !== undefined).sort();
 }
 
@@ -45,6 +50,14 @@ export function movedLocks(base: string, lockFile: string | undefined): string[]
 export interface PermLangStep {
   workingDirectory: string | undefined;
   args: string | undefined;
+  /**
+   * The step runs whenever its workflow runs for a pull request, and fails its job when it fails:
+   * the workflow runs for every pull request, and nothing on the step, its job, or a job it needs
+   * says otherwise (`if:`, or `continue-on-error:`). GitHub counts a skipped job as passed. An
+   * `if:` of `always()` or `!cancelled()` runs the step or job anyway, and the jobs its job needs
+   * then don't matter: it runs when they fail.
+   */
+  surelyRuns: boolean;
 }
 
 /** The steps in these workflows that run the PermLang Action. */
@@ -53,16 +66,17 @@ export function permLangSteps(files: readonly string[], read: Reader): PermLangS
   for (const file of files) {
     const yaml = parse(read(file));
     if (!yaml) continue;
-    for (const jobs of yaml.get(yaml.root(), "jobs")) {
-      for (const job of yaml.fields(jobs)) {
-        for (const steps of yaml.get(job.value, "steps")) {
-          for (const step of yaml.items(steps)) {
-            const uses = scalar(yaml, yaml.get(step, "uses"));
-            if (uses === undefined || !isPermLang(uses, read)) continue;
-            const inputs = yaml.get(step, "with");
-            const input = (name: string) => scalar(yaml, inputs.flatMap((w) => yaml.get(w, name)));
-            found.push({ workingDirectory: input("working-directory"), args: input("args") });
-          }
+    const everyPullRequest = runsForEveryPullRequest(yaml);
+    const jobs = new Map(yaml.get(yaml.root(), "jobs").flatMap((j) => yaml.fields(j).map((f) => [f.key, f.value] as const)));
+    for (const [name, job] of jobs) {
+      const jobRuns = everyPullRequest && jobSurelyRuns(yaml, jobs, name, new Set());
+      for (const steps of yaml.get(job, "steps")) {
+        for (const step of yaml.items(steps)) {
+          const uses = scalar(yaml, yaml.get(step, "uses"));
+          if (uses === undefined || !isPermLang(uses, read)) continue;
+          const inputs = yaml.get(step, "with");
+          const input = (name: string) => scalar(yaml, inputs.flatMap((w) => yaml.get(w, name)));
+          found.push({ workingDirectory: input("working-directory"), args: input("args"), surelyRuns: jobRuns && unconditional(yaml, step) });
         }
       }
     }
@@ -70,10 +84,54 @@ export function permLangSteps(files: readonly string[], read: Reader): PermLangS
   return found;
 }
 
-/** The lock files the PermLang steps in these workflows read, from the repository root; steps whose lock can't be told are left out. */
-export function locksRead(files: readonly string[], read: Reader): Set<string> {
+/** Whether the workflow runs for every pull request: `pull_request` among its events, with no filter on which. */
+function runsForEveryPullRequest(yaml: YamlFile): boolean {
+  const FILTERS = ["branches", "branches-ignore", "paths", "paths-ignore", "types"];
+  return yaml.get(yaml.root(), "on").some(
+    (on) =>
+      yaml.text(on.node) === "pull_request" ||
+      yaml.items(on).some((event) => yaml.text(event.node) === "pull_request") ||
+      yaml.fields(on).some((event) => event.key === "pull_request" && (yaml.text(event.value.node) === "" || (yaml.text(event.value.node) === undefined && !yaml.fields(event.value).some((f) => FILTERS.includes(f.key))))),
+  );
+}
+
+/**
+ * Whether a job runs whenever its workflow does, and fails it when it fails: it's unconditional,
+ * and either runs always or needs only jobs that surely run.
+ */
+function jobSurelyRuns(yaml: YamlFile, jobs: ReadonlyMap<string, Value>, name: string, seen: Set<string>): boolean {
+  const job = jobs.get(name);
+  if (job === undefined || seen.has(name) || !unconditional(yaml, job)) return false;
+  if (yaml.get(job, "if").length > 0) return true; // always() or !cancelled(): it runs when a job it needs fails.
+  seen.add(name);
+  const needs = yaml.get(job, "needs").flatMap((n) => [yaml.text(n.node), ...yaml.items(n).map((i) => yaml.text(i.node))]);
+  return needs.every((n) => n !== undefined && jobSurelyRuns(yaml, jobs, n, seen));
+}
+
+/** `always()` or `!cancelled()`, alone, with or without `${{ }}`. */
+const ALWAYS = /^(?:\$\{\{\s*(?:always\(\)|!\s*cancelled\(\))\s*\}\}|always\(\)|!\s*cancelled\(\))$/;
+
+/**
+ * A job or step with no `if:` other than `always()` or `!cancelled()`, whose failure isn't
+ * ignored (`continue-on-error:` other than false).
+ */
+function unconditional(yaml: YamlFile, node: Value): boolean {
+  const ifs = yaml.get(node, "if");
+  return (
+    ifs.length <= 1 &&
+    ifs.every((v) => ALWAYS.test(yaml.text(v.node)?.trim() ?? "")) &&
+    yaml.get(node, "continue-on-error").every((v) => yaml.text(v.node) === "false")
+  );
+}
+
+/**
+ * The lock files the PermLang steps in these workflows read, from the repository root; steps whose
+ * lock can't be told are left out, and with `surelyRuns`, steps that may not run (see PermLangStep).
+ */
+export function locksRead(files: readonly string[], read: Reader, options: { surelyRuns?: boolean } = {}): Set<string> {
   const locks = new Set<string>();
   for (const step of permLangSteps(files, read)) {
+    if (options.surelyRuns && !step.surelyRuns) continue;
     const lock = stepLock(step);
     if (lock !== undefined) locks.add(lock);
   }

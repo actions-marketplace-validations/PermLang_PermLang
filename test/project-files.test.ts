@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Project configuration in the lock: GitHub workflows, composite Actions, and package.json
 // scripts. AI agents edit these as readily as code, and a new `permissions: write-all`, secret,
 // or postinstall hook is a bigger change than most functions, so each is recorded and reviewed.

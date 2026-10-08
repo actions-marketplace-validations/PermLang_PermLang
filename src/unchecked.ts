@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Code PermLang can't see into: a package called with no adapter (PERM006), and an import whose
 // types can't be found (PERM007). Both are trusted, with a warning, so new code of either kind
 // could do anything without adding a capability to the lock. The lock records them too, in one

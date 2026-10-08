@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // permlang.lock.json records what every function can reach, what the project's configuration
 // grants, and the settings the check runs with. It is committed, so new access shows up as a
 // change to the lock in the pull request's own diff, and `permlang check` fails when the code and
@@ -94,14 +97,14 @@ export function parseLock(text: string, source: string): LockFile {
     const shown = version === undefined ? "missing" : oneLine(JSON.stringify(version));
     throw new LockError(`${source}: lock file version ${shown} isn't one this PermLang reads (1 or 2). Run \`permlang lock\` to regenerate it.`);
   }
-  const functions: Record<string, string[]> = Object.create(null);
+  const functions = Object.create(null) as Record<string, string[]>;
   for (const [key, caps] of Object.entries(record(own(raw, "functions"), `${source}: "functions"`))) {
     if (!Array.isArray(caps) || !caps.every((c) => typeof c === "string")) {
       throw new LockError(`${source}: "${oneLine(key)}" must list capabilities as an array of strings.`);
     }
     functions[key] = [...caps].sort();
   }
-  const unsafe: Record<string, string> = Object.create(null);
+  const unsafe = Object.create(null) as Record<string, string>;
   for (const [key, reason] of Object.entries(record(own(raw, "unsafe"), `${source}: "unsafe"`))) {
     if (typeof reason !== "string") throw new LockError(`${source}: unsafe entry "${oneLine(key)}" must be a reason string.`);
     unsafe[key] = reason;

@@ -30,6 +30,14 @@ inputs:
     description: "Also upload the findings to GitHub code scanning (the Security tab). Needs `security-events: write` permission."
     required: false
     default: "false"
+  dependencies:
+    description: The name of an artifact, uploaded by an earlier job, holding a tar archive of the project's node_modules folders, which the check reads types from. Installing runs code the pull request controls, so it belongs in another job; only node_modules folders (and the generated folders named) come in from it, as new folders.
+    required: false
+    default: ""
+  generated:
+    description: Folders, from the repository root and split on spaces, that the installing job generated outside node_modules (such as a Prisma client in src/generated) and packed too. They mustn't be in the checkout.
+    required: false
+    default: ""
 
 outputs:
   exit-code:
@@ -92,7 +100,15 @@ runs:
     # actions/cache rejects paths containing `.` segments, and github.action_path is
     # `<workspace>/./` when the action runs from its own repository (`uses: ./`), so
     # the cached paths use the directory's resolved absolute path.
+    #
+    # Only on a push, or a scheduled or manual run, though. For a pull request or a merge
+    # queue entry, GitHub looks first in that pull request's own cache, which any job that
+    # runs for it can write to: the pull request's code (its tests, say) could put a build of
+    # its own there under this key, which would then run instead of PermLang. So there,
+    # PermLang is built from its sources and lockfile every time, and the build isn't saved.
+    # (GHSA-2vhg-398w-7p59)
     - name: Compute build cache key
+      if: contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name)
       id: build-key
       shell: bash
       working-directory: ${{ github.action_path }}
@@ -106,6 +122,7 @@ runs:
         if [ "$RUNNER_OS" = Windows ]; then echo "dir=$(cygpath -m "$(pwd -P)")" >> "$GITHUB_OUTPUT"; else echo "dir=$(pwd -P)" >> "$GITHUB_OUTPUT"; fi
 
     - name: Restore the build
+      if: steps.build-key.outputs.key != ''
       id: build-cache
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
@@ -126,13 +143,46 @@ runs:
         npm ci --ignore-scripts --no-audit --no-fund && npm run build
 
     - name: Save the build
-      if: steps.build-cache.outputs.cache-hit != 'true'
+      if: steps.build-key.outputs.key != '' && steps.build-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ${{ steps.build-key.outputs.dir }}/node_modules
           ${{ steps.build-key.outputs.dir }}/dist
         key: ${{ steps.build-key.outputs.key }}
+
+    # The packages another job installed, for the check to read their types. Installing runs code
+    # the pull request controls, even with install scripts off (a package manager's settings and
+    # plugins can), and code that runs in this job before the check could change what it runs or
+    # reports. So it happens in a job of its own, which packs every node_modules folder, and only
+    # those folders (and the generated folders named) come in from its archive, as new folders,
+    # with links that stay in the repository (src/dependencies.ts). (GHSA-chh9-p8fq-3gf9)
+    - name: Download the dependencies
+      id: download
+      if: inputs.dependencies != ''
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: ${{ inputs.dependencies }}
+        path: ${{ runner.temp }}/permlang-dependencies
+
+    # The check's job runs even when the job that installs fails (`if: always()`), so that it fails
+    # too: a job skipped because a job it needs failed counts as passed. (GHSA-86ff-3f4h-rrjp)
+    - name: Explain the missing dependencies
+      if: failure() && steps.download.outcome == 'failure'
+      shell: bash
+      run: echo "::error::There are no dependencies to download, so PermLang can't check this code. The job that installs them may have failed; see its log."
+
+    - name: Import the dependencies
+      if: inputs.dependencies != ''
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        NODE: ${{ steps.node.outputs.path }}
+        IMPORT: ${{ github.action_path }}/dist/import-dependencies.js
+        GENERATED: ${{ inputs.generated }}
+      run: |
+        set -f  # GENERATED is split on spaces, like a command line, but never glob-expanded.
+        "$NODE" "$IMPORT" "$RUNNER_TEMP/permlang-dependencies" "$RUNNER_TEMP" $GENERATED
 
     # Deleting the lock file, or pointing the check at another one, mustn't turn it off. On a
     # pull request (or merge queue entry), the check compares with the base commit (--base): it
@@ -146,6 +196,8 @@ runs:
       env:
         NODE: ${{ steps.node.outputs.path }}
         BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        TOKEN: ${{ inputs.github-token }}
+        GIT_TERMINAL_PROMPT: "0"
       run: |
         set +e
         fetched=false
@@ -157,7 +209,13 @@ runs:
           else
             depth=()
             [ "$(git rev-parse --is-shallow-repository)" = true ] && depth=(--depth=1)
-            if git fetch --no-tags "${depth[@]}" origin "$BASE_SHA"; then
+            # A checkout that didn't keep its token (persist-credentials: false, as in the workflow
+            # init writes) can't fetch from a private repository. Then the Action's token goes to
+            # this one fetch, in a header, and is kept nowhere.
+            # (The first try's error is shown only when there's no second.)
+            header() { printf 'AUTHORIZATION: basic %s' "$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')"; }
+            fetch() { git "$@" fetch --no-tags "${depth[@]}" origin "$BASE_SHA"; }
+            if { [ -z "$TOKEN" ] && fetch; } || { [ -n "$TOKEN" ] && { fetch 2> /dev/null || fetch -c "http.extraheader=$(header)"; }; }; then
               fetched=true
             else
               echo "::warning::Couldn't fetch the base commit, so a missing lock file fails the check, and the permission diff can't be shown."
@@ -247,9 +305,11 @@ runs:
         elif [ "$status" -ne 0 ]; then
           echo "::warning::Couldn't compute the permission diff (see the error above). The comment says so."
         fi
+        # Even a diff that fails prints a comment saying so; nothing at all means it died (out of
+        # memory, or stopped), and an earlier push's comment would go on looking current.
         if [ ! -s "$body" ]; then
-          echo "::warning::No permission diff to post."
-          exit 0
+          echo "::error::PermLang's diff printed nothing (exit code $status), so the pull request's comment can't be updated, and may still show an earlier push's diff."
+          exit 1
         fi
         # A check that stopped with an error (exit code 2, such as for an option it doesn't take
         # that diff does) compared nothing, whatever the diff shows: the comment says so first,

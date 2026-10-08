@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Prisma: recognizing its client, and the related tables a query reaches.
 //
 // Each test builds a small project on disk, with stand-ins for the generated client

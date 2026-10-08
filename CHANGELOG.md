@@ -2,6 +2,145 @@
 
 All notable changes to PermLang.
 
+## 0.4.3 (2026-10-07)
+
+**A security release**, for workflows that 0.4.2's `permlang init --workflow`
+wrote, or that follow 0.4.2's [reference](docs/reference.md#github-action). Add
+`if: always()` to the check's job, beside `needs: dependencies`:
+
+```yaml
+  permissions:
+    needs: dependencies
+    if: always()
+```
+
+Or delete `.github/workflows/permlang.yml` and run
+`npx permlang@0.4.3 init <your paths> --workflow` again. Nothing that passed
+with 0.4.2 fails with 0.4.3.
+
+### Security
+
+- **A failed install skipped the check (low,
+  [GHSA-86ff-3f4h-rrjp](https://github.com/PermLang/PermLang/security/advisories/GHSA-86ff-3f4h-rrjp)).**
+  0.4.2's workflow runs the check in a job after the one that installs the
+  dependencies. When that job fails, GitHub skips the check's job, and counts a
+  skipped job as passed, also as a required check. Code the pull request runs
+  while installing could fail that job on purpose, and only that job, so the
+  pull request could merge without a check. The check's job now runs always,
+  and fails when there are no dependencies to download, saying why.
+
+### Fixed
+
+- **The rule for moved lock files** counts a step whose job has
+  `if: always()` or `if: !cancelled()` as sure to run: it runs even when a job
+  it needs fails.
+
+### Project
+
+- **PermLang's own `released` check** installs its dependencies in a job of
+  its own, as `init`'s workflow does, and runs 0.4.2.
+
+## 0.4.2 (2026-10-07)
+
+**A security release.** It fixes four vulnerabilities, two of them high
+severity. `@v0` users get the Action's fixes automatically, but the most
+serious one needs a change to your workflow, in two cases:
+
+- your workflow installs dependencies, builds, or runs tests in the same job as
+  the PermLang Action, before it;
+- `permlang init --workflow` wrote it (before 0.4.2, it did exactly that).
+
+In either case, a pull request can change the check's result. Delete
+`.github/workflows/permlang.yml` and run
+`npx permlang@0.4.2 init <your paths> --workflow` again, or split it into two
+jobs as the [reference](docs/reference.md#github-action) shows. Nothing that
+passed with 0.4.1 fails with 0.4.2, unless a setting in `permlang.config.json`
+isn't text ([below](#fixed)).
+
+### Security
+
+- **Installing ran in the check's job (high,
+  [GHSA-chh9-p8fq-3gf9](https://github.com/PermLang/PermLang/security/advisories/GHSA-chh9-p8fq-3gf9)).**
+  The workflow `init --workflow` wrote installed the dependencies in the same
+  job as the check, before it. Installing runs code the pull request controls,
+  even with install scripts off:
+  - pnpm loads `.pnpmfile.cjs`;
+  - Yarn 2 and later run `yarnPath` and its plugins;
+  - npm runs the program a project `.npmrc` names as `git`.
+
+  That code could change what the check runs or reports. The workflow now has
+  two jobs:
+  - **`dependencies`** installs with a read-only token, packs every
+    `node_modules` folder, and uploads them.
+  - **`permissions`** runs nothing from the pull request. It brings in the
+    packed folders with the Action's new `dependencies` input, which refuses
+    the whole archive if it has anything else, a link out of the repository or
+    into `.git`, or a folder the checkout already has.
+
+  Code generated outside `node_modules` (a Prisma client in `src/generated`,
+  say) can come along through the new `generated` input.
+- **The Action's build cache could be replaced on a pull request (high,
+  [GHSA-2vhg-398w-7p59](https://github.com/PermLang/PermLang/security/advisories/GHSA-2vhg-398w-7p59)).**
+  The Action restored its own build from the Actions cache and ran it unchecked.
+  For a pull request, GitHub looks first in the pull request's own cache, which
+  any of its jobs can write to. So code from the pull request (its tests, say)
+  could put a build of its own there, which would then run instead of PermLang.
+  The cache is now used only for pushes, and scheduled and manual runs. Pull
+  requests and merge queue entries build PermLang from its sources every time,
+  which takes about half a minute.
+- **A step that never runs kept a moved lock from failing the check (moderate,
+  [GHSA-h4jc-gqvh-2675](https://github.com/PermLang/PermLang/security/advisories/GHSA-h4jc-gqvh-2675)).**
+  The rule for moved locks (since 0.4.0) let a pull request off when any
+  PermLang step still read the base's lock, even one with `if: false`. Now only
+  a step that's sure to run counts:
+  - its workflow runs on every pull request;
+  - no `if:` on the step, its job, or a job its job needs;
+  - its failure isn't ignored (`continue-on-error:`).
+- **A file path could inject workflow commands into the job log (low,
+  [GHSA-86xw-2f2v-g8vw](https://github.com/PermLang/PermLang/security/advisories/GHSA-86xw-2f2v-g8vw)).**
+  A checked file in a top-level folder named `::stop-commands::x` started a line
+  of the report that the runner obeyed, hiding the annotations after it. In
+  GitHub Actions, PermLang now tells the runner to ignore commands, until a
+  token only that run knows, while it prints.
+
+### Fixed
+
+- **The pull-request comment could go on showing an earlier push's diff** when
+  `permlang diff` died without printing anything (out of memory, or stopped).
+  The comment step now fails instead.
+- **A capability named `constructor`** (or another name every JavaScript object
+  has), which an adapter can define, made the diff's comment and text output
+  throw.
+- **An added dependency named `../x`** made the diff read `x/package.json`, and
+  show its install scripts. A name npm wouldn't allow is now treated as not
+  installed.
+- **Tens of thousands of `@perm` tags in one comment, or of `package.json`
+  scripts,** took minutes to read: 50,000 took 70 and 34 seconds. Both now take
+  well under a second.
+- **A setting in `permlang.config.json` that isn't text** was read as text, so
+  `"unmapped": ["error"]` worked as `"unmapped": "error"`. It now stops the
+  check with the usual message listing the allowed values (exit code 2).
+
+### Project
+
+- **Each release comes with an SBOM**: a CycloneDX list of every package
+  installing PermLang installs, signed by the release workflow and attached to
+  the GitHub release ([SECURITY.md](SECURITY.md#whats-in-a-release-sbom)).
+- **Anyone can rebuild a release** from its tag and get the same package, byte
+  for byte; CI checks that building twice gives the same result
+  ([SECURITY.md](SECURITY.md#rebuilding-a-release)).
+- **Every pull request is also checked by:**
+  - ESLint, with typescript-eslint's type-aware rules;
+  - a review of its new and updated dependencies, which fails on a known
+    vulnerability or a license PermLang can't use;
+  - a check that each commit is signed off by its author
+    ([CONTRIBUTING.md](CONTRIBUTING.md#signing-off)).
+- Every source file starts with its license, and a test keeps hidden and
+  bidirectional characters out of them.
+- [docs/policies.md](docs/policies.md) writes down how dependencies are chosen,
+  which findings block a merge, how secrets are kept, and what every change
+  must include.
+
 ## 0.4.1 (2026-10-06)
 
 Nothing that passed with 0.4.0 fails with 0.4.1.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Strictness levels (design doc §7), set in permlang.config.json:
 //   sketch       permissions are inferred and reported; annotation rules don't fail
 //   development  exported functions and entry points must declare what they reach

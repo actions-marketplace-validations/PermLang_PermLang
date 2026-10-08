@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // The global fetch. A local function named `fetch` is not the network.
 
 import { Node, type CallExpression } from "ts-morph";

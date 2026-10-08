@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Capability functions and constructors used as values: `urls.map(fetch)`,
 // `promisify(exec)`, `paths.forEach(unlinkSync)`, `Reflect.construct(WebSocket, [url])`.
 // The function can then be called anywhere with any arguments, so the reference
@@ -19,7 +22,7 @@
 // set by a call, such as what createRequire returns) is judged by its type: the
 // functions its call signatures declare.
 
-import { Node, SyntaxKind, type BindingElement, type CallExpression, type Expression, type Identifier, type PropertyAccessExpression, type SourceFile, type Symbol as MorphSymbol, type Type } from "ts-morph";
+import { Node, SyntaxKind, VariableDeclarationKind, type BindingElement, type CallExpression, type Expression, type Identifier, type PropertyAccessExpression, type SourceFile, type Symbol as MorphSymbol, type Type } from "ts-morph";
 import { packageOf, type AdapterIndex } from "../adapters.js";
 import { UNVERIFIABLE, type Capability } from "../capability.js";
 import { admitsString, callText, containerName, isReflectApply, literalString, resolveAlias, resolvedDeclaration, signatureDeclarations, unwrapExpression, type CallLike, type CapabilityUse } from "./shared.js";
@@ -110,7 +113,7 @@ function aliasedSymbol(declaration: Node): MorphSymbol | undefined {
   if (Node.isShorthandPropertyAssignment(declaration)) return declaration.getValueSymbol();
   if (Node.isBindingElement(declaration)) return destructuredProperty(declaration);
   const holdsValue =
-    (Node.isVariableDeclaration(declaration) && declaration.getVariableStatement()?.getDeclarationKind() === "const") ||
+    (Node.isVariableDeclaration(declaration) && declaration.getVariableStatement()?.getDeclarationKind() === VariableDeclarationKind.Const) ||
     Node.isPropertyAssignment(declaration);
   const initializer = holdsValue ? declaration.getInitializer() : undefined;
   const value = initializer && unwrapExpression(initializer);
@@ -210,7 +213,7 @@ function boundCopy(site: Node): CallExpression | undefined {
 
 function isConstInitializer(node: Node): boolean {
   const parent = node.getParent();
-  return Node.isVariableDeclaration(parent) && parent.getInitializer() === node && parent.getVariableStatement()?.getDeclarationKind() === "const";
+  return Node.isVariableDeclaration(parent) && parent.getInitializer() === node && parent.getVariableStatement()?.getDeclarationKind() === VariableDeclarationKind.Const;
 }
 
 /** Node's util.promisify. */
@@ -278,7 +281,7 @@ function isExempt(site: Node): boolean {
   if (Node.isVariableDeclaration(parent) && parent.getInitializer() === site && Node.isIdentifier(parent.getNameNode())) {
     const type = parent.getType();
     const keepsSignature = type.getCallSignatures().length > 0 || type.getConstructSignatures().length > 0;
-    return parent.getVariableStatement()?.getDeclarationKind() === "const" && keepsSignature;
+    return parent.getVariableStatement()?.getDeclarationKind() === VariableDeclarationKind.Const && keepsSignature;
   }
   // `export default fetch` and `export = run` export the function itself, like `export { run }`:
   // calls through the import resolve to it. Inside a larger expression (`export default [run]`,

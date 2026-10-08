@@ -36,7 +36,7 @@ This writes three files. Commit all of them:
 | --- | --- |
 | `permlang.config.json` | Settings. Starts at `"strictness": "sketch"`: everything is reported, and only a difference between the code and the lock fails, such as new access the lock doesn't record (plus any flow rules, or `"error"` policies, you add later). |
 | `permlang.lock.json` | What every function can reach today (network hosts, files, database tables, environment variables, processes), and what your workflows and `package.json` scripts grant (token permissions, secrets, Actions, install hooks). It also records which files were checked (`src` here, and any files it imports from elsewhere), the settings, and the code PermLang can't check (packages with no adapter, imports with no types). |
-| `.github/workflows/permlang.yml` | Installs your dependencies (for their types), then runs PermLang on every pull request and comments the permission diff. |
+| `.github/workflows/permlang.yml` | On every pull request, installs your dependencies (for their types) in one job, then runs PermLang in another, where nothing from the pull request runs, and comments the permission diff. ([Why two jobs](reference.md#github-action).) |
 
 ## 3. Review what you have
 

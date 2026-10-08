@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // New dependencies in a change. A package added to package.json can do anything its
 // code does, and PermLang only sees inside it if an adapter describes it. So the
 // permission diff lists each new package, what PermLang knows about it, and the

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Runs the permlang command in this process, as a shell in `cwd` would: the exit code, and
 // what it printed (stderr too, when it fails). Faster than starting a process per run, and
 // coverage sees the code. test/cli.test.ts also runs the real executable.
@@ -19,7 +22,9 @@ export function runCliStreams(args: string[], options: Options): { code: number;
   const stderr: string[] = [];
   const log = vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => void stdout.push(`${format(...a)}\n`));
   const error = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => void stderr.push(`${format(...a)}\n`));
-  const env = options.env ?? {};
+  // As outside GitHub Actions, wherever the tests run, unless a test says otherwise: in Actions,
+  // PermLang tells the runner to ignore workflow commands while it runs.
+  const env = { GITHUB_ACTIONS: undefined, ...options.env };
   const saved = { cwd: process.cwd(), env: Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]])) };
   process.chdir(options.cwd);
   setEnv(env);

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // GitHub annotations: `permlang check --annotations` adds a workflow command per
 // diagnostic, so each one shows on its line in a pull request's "Files changed" tab.
 

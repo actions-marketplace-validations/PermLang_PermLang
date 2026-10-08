@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // The related tables a Prisma query reaches through its arguments: `include`,
 // `select`, `where`, and `orderBy` read related models, and nested writes in `data`
 // write them. Drizzle's `with` is walked the same way (drizzle.ts).
@@ -349,7 +352,7 @@ function relationsOf(model: Model, at: Node): Map<string, Relation> | undefined 
 /** A payload's model name, when its `name` is a literal: `"Lead"`. */
 function literalName(payload: Type, at: Node): string | undefined {
   const name = payload.getProperty("name")?.getTypeAtLocation(at);
-  return name?.isStringLiteral() ? String(name.getLiteralValue()) : undefined;
+  return name?.isStringLiteral() ? name.getLiteralValue() as string : undefined;
 }
 
 type Alias = Node & { getType(): Type };

@@ -11,7 +11,7 @@ name: PermLang
 #   can't change the code that judges it. It has a lock file of its own,
 #   permlang.released.lock.json, written by that release: a pull request that
 #   changes what PermLang detects changes what the new version sees in this
-#   code, but not what the release sees. Make it a required check.
+#   code, but not what the release sees. It's a required check.
 
 on:
   pull_request:
@@ -36,17 +36,38 @@ jobs:
           args: src
           sarif: true
 
-  released:
+  # Installs this repository's dependencies, whose types `released` reads (@types/node).
+  # Installing can run code a pull request controls (GHSA-chh9-p8fq-3gf9), so it happens here,
+  # and nothing from the pull request runs in `released`.
+  dependencies:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The released Action builds itself apart from this repository, so this one's
-      # dependencies, whose types it reads (@types/node), are installed here.
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - uses: PermLang/permlang@7505fc536c65977724bb6884b7de072c1e04ba1d # v0.4.0
+      - name: Pack the dependencies for the check
+        run: find . -name node_modules -type d -prune -print0 | tar --null -cf "$RUNNER_TEMP/dependencies.tar" -T -
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: permlang-dependencies
+          path: ${{ runner.temp }}/dependencies.tar
+          retention-days: 1
+
+  released:
+    needs: dependencies
+    # Runs even when `dependencies` fails, and then fails too: a skipped job counts as passed.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: PermLang/permlang@a78f4383aa7ca98cc70860ea9b6cd7329f7f6d34 # v0.4.2
         with:
           args: src --lock permlang.released.lock.json
           comment: false
+          dependencies: permlang-dependencies

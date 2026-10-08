@@ -40,6 +40,56 @@ jobs:
           set +e; node dist/cli.js check fixtures/m1/fail --no-lock > /dev/null; code=$?; set -e
           test "$code" -eq 1
 
+  # The lint rules in eslint.config.js, which read types, so they run once: they don't change
+  # between platforms.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run lint
+
+  # The software bill of materials each release gets (release.yml), made and checked against
+  # package-lock.json here too, so a change that breaks it shows up before a release does.
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - run: npm run sbom -- permlang.cdx.json
+
+  # Builds and packs the package twice, from scratch each time, and compares the two: the same
+  # source must give the same bytes, so anyone can rebuild a release from its tag and compare
+  # it with what's on npm (SECURITY.md).
+  reproducible:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Build and pack twice
+        shell: bash
+        run: |
+          npm run build && first=$(npm pack | tail -n 1) && mv "$first" "first-$first"
+          npm run build && second=$(npm pack | tail -n 1)
+          sha256sum "first-$first" "$second"
+          cmp "first-$first" "$second"
+
   # Measures what the tests cover and uploads it to Codecov, for the README badge. A job of
   # its own, so only it can get the OIDC token Codecov signs in with (no stored secret).
   coverage:

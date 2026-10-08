@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Adapter manifests: small JSON files that map a library's functions to
 // capabilities. PermLang ships adapters for common libraries (adapters/*.json)
 // and teams can add their own.

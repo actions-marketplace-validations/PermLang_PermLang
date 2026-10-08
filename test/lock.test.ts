@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // permlang.lock.json records what every function can reach. It is committed, so
 // new access shows up as a change to the lock in the pull request's diff, and
 // `permlang check` fails when the code and the lock disagree.

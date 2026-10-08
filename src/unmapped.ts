@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Packages that first-party code calls into but no adapter covers. PermLang can't
-// see what they touch, so it trusts them (design doc decision D1). The real-world
+// see what they touch, so it trusts them (docs/design.md#design-decisions). The real-world
 // trial found network SDKs among them (kafkajs, redis, AI SDKs), so they are listed
 // in every report instead of passing silently. Packages that touch nothing
 // PermLang tracks are declared pure in adapters/pure.json.

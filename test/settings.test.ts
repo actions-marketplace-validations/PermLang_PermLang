@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // What the check runs with is recorded in the lock, like what the code reaches: a pull request
 // that loosens permlang.config.json, adds an adapter, or narrows tsconfig.json changes the lock,
 // so the check fails until `permlang lock` records it (found in the code review, G2, G5, O5).

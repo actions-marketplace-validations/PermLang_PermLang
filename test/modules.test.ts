@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Loading a file that looks like an asset: a stylesheet, an image, JSON. A bundler (or
 // Node's ES module loader) loads it as what it is, but Node's require() runs every file
 // except a .json one as JavaScript, and adds `.js` to a path that doesn't exist:

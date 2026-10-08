@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // The permlang command's arguments: which options each command takes, and what they mean.
-// Kept apart from main.ts so that reading the Action's `args` in a workflow (action-steps.ts)
+// Kept apart from main.ts so that reading the Action's `args` in a workflow (lock-moves.ts)
 // parses them exactly as the command would.
 
 import { printable } from "./report.js";

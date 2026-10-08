@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // The text report prints values that come from the analyzed code: capabilities built from string
 // literals, tool names, @perm-unsafe reasons, package names. In GitHub Actions, the runner reads
 // every line of a step's output and obeys the ones that start with `::` (workflow commands), so a

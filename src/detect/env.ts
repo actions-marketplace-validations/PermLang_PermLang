@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Environment variables: any expression typed NodeJS.ProcessEnv, and Vite-style
 // `import.meta.env` (typed ImportMetaEnv).
 //
@@ -14,7 +17,7 @@
 // `import.meta.env` (or `import.meta["env"]`, an alias, a destructured name) when
 // nothing declares it.
 
-import { Node, SyntaxKind, ts, type ArrayBindingPattern, type Identifier, type ObjectBindingPattern, type ObjectLiteralExpression, type SourceFile } from "ts-morph";
+import { Node, SyntaxKind, VariableDeclarationKind, ts, type ArrayBindingPattern, type Identifier, type ObjectBindingPattern, type ObjectLiteralExpression, type SourceFile } from "ts-morph";
 import type { Capability } from "../capability.js";
 import { literalString, unwrapExpression, type CapabilityUse } from "./shared.js";
 import { forEachDescendant } from "../walk.js";
@@ -219,7 +222,7 @@ function untypedHolder(object: Node, depth = 0): Holder | undefined {
   }
   if (!Node.isIdentifier(object) || depth > 8) return undefined;
   const declaration = object.getSymbol()?.getDeclarations()[0];
-  const isConst = Node.isVariableDeclaration(declaration) && declaration.getVariableStatement()?.getDeclarationKind() === "const";
+  const isConst = Node.isVariableDeclaration(declaration) && declaration.getVariableStatement()?.getDeclarationKind() === VariableDeclarationKind.Const;
   const initializer = isConst ? declaration.getInitializer() : undefined;
   return initializer && untypedHolder(unwrapExpression(initializer), depth + 1);
 }

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Engine behaviour that needs a project of its own: package boundaries for declaration
 // files, reusing a ts-morph Project, very long call chains, and very deep expressions.
 

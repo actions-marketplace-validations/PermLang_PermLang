@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Tools given to AI models. A function registered as a tool (MCP, the Vercel AI SDK,
 // OpenAI Agents, LangChain, ...) runs when the model decides to call it, and the model
 // does what its input says, so whoever controls that input can trigger it. Prompt
@@ -7,6 +10,7 @@
 import {
   Node,
   SyntaxKind,
+  VariableDeclarationKind,
   type BinaryExpression,
   type CallExpression,
   type ClassDeclaration,
@@ -151,7 +155,7 @@ function frameworkTypeName(call: CallExpression | NewExpression): string | undef
   const type = call.getType();
   const symbol = type.getAliasSymbol() ?? type.getSymbol();
   const declaration = symbol?.getDeclarations()[0];
-  return declaration && aiFramework(packageOf(declaration)) !== undefined ? symbol!.getName() : undefined;
+  return declaration && aiFramework(packageOf(declaration)) !== undefined ? symbol.getName() : undefined;
 }
 
 /**
@@ -537,8 +541,8 @@ function objectLiteralOf(node: Node | undefined, depth = 0): ObjectLiteralExpres
 function constantOf(node: Node): VariableDeclaration | undefined {
   const symbol = Node.isShorthandPropertyAssignment(node) ? node.getValueSymbol() : node.getSymbol();
   const declaration = symbol && resolveAlias(symbol).getDeclarations()[0];
-  const isConst = declaration && Node.isVariableDeclaration(declaration) && declaration.getVariableStatement()?.getDeclarationKind() === "const";
-  return isConst && !isThirdParty(declaration) ? (declaration as VariableDeclaration) : undefined;
+  const isConst = declaration && Node.isVariableDeclaration(declaration) && declaration.getVariableStatement()?.getDeclarationKind() === VariableDeclarationKind.Const;
+  return isConst && !isThirdParty(declaration) ? declaration : undefined;
 }
 
 /** `new ShellTool()` where ShellTool is your class extending a framework's tool class (LangChain's `StructuredTool`). */
@@ -546,7 +550,7 @@ function toolSubclass(call: NewExpression): ToolRegistration | undefined {
   const cls = classOf(call.getExpression());
   if (!cls || isThirdParty(cls)) return undefined;
   const chain = firstPartyChain(cls);
-  const base = frameworkToolBase(chain.at(-1)!);
+  const base = frameworkToolBase(chain.at(-1));
   if (!base) return undefined;
   const framework = aiFramework(packageOf(base))!;
   // The whole class: LangChain runs `_call` through `invoke`, but a subclass can override

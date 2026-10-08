@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Compares each function's declared permissions with everything it can reach.
 //
 // A unit's actual permissions are its direct uses plus everything its callees
@@ -16,7 +19,7 @@ import { projectFiles } from "./project-files.js";
 import { findTools, handlerReach } from "./tools.js";
 import { checkFlowTargets, flowDiagnostics, opaqueUses, type FlowRule } from "./flows.js";
 import { failureReason, projectOfFiles, projectOfTsConfig, unparsedReason } from "./load.js";
-import { clearResolutionCache, resolveAlias } from "./detect/shared.js";
+import { clearResolutionCache } from "./detect/shared.js";
 import { unmappedPackages, unresolvedImports, type UnmappedPackage } from "./unmapped.js";
 import { unseenFrom } from "./unseen.js";
 import { forEachDescendant, lineAndColumn } from "./walk.js";
@@ -118,7 +121,7 @@ export interface Report {
   functions: FunctionReport[];
   diagnostics: Diagnostic[];
   unsafe: UnsafeReport[];
-  /** Packages called with no adapter, most calls first. PermLang trusts them (D1). */
+  /** Packages called with no adapter, most calls first. PermLang trusts them, and lists them (docs/design.md#design-decisions). */
   unmapped: UnmappedPackage[];
   /** Imported modules whose types can't be found, so nothing called from them is checked. */
   unresolved: string[];
@@ -142,7 +145,7 @@ export interface Report {
 }
 
 /**
- * How strictly annotations are enforced (design doc §7). An out-of-date lock
+ * How strictly annotations are enforced (docs/reference.md#strictness-levels). An out-of-date lock
  * file fails at every level: it is the review gate, not an annotation rule. So do
  * flow rules, and "error" policies for unmapped packages and AI tools: they are
  * asked for explicitly in the configuration.
@@ -190,8 +193,8 @@ const DEFAULT_COMPILER_OPTIONS: ts.CompilerOptions = {
   skipLibCheck: true,
 };
 
-// These read source files through ts-morph too. ts-morph has no adapter, so that
-// read isn't detected (design doc decision D1); fs.read covers it anyway.
+// These read source files through ts-morph too, which PermLang's own adapter for it
+// (permlang/adapters/ts-morph.json) records as fs.read.
 
 /** @perm fs.read */
 export function checkFiles(files: readonly string[], options: CheckOptions = {}): Report {

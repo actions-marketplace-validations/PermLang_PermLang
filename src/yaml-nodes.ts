@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // YAML as GitHub reads workflow and Action files. Its parser (actions/languageservices)
 // uses this same `yaml` library, with YAML 1.2's core schema whatever a `%YAML`
 // directive says, so `on:` is the key "on", never `true`. It resolves anchors and
@@ -103,7 +106,9 @@ export class YamlFile {
   text(node: YamlNode | null | undefined): string | undefined {
     if (!isScalar(node)) return undefined;
     if (typeof node.value === "string") return literalOf(node.value);
-    return node.value === null ? "" : String(node.value);
+    if (node.value === null) return "";
+    // The core schema reads every other scalar as a number or a boolean.
+    return typeof node.value === "number" || typeof node.value === "boolean" ? String(node.value) : undefined;
   }
 
   /** Where a parsed node, or a pair's key, starts. Every parsed node has a range. */
@@ -129,7 +134,7 @@ export class YamlFile {
     if (!(key instanceof Scalar) || key.type !== Scalar.PLAIN || key.value !== "<<") return undefined;
     const value = this.deref(pair.value as YamlNode | null);
     const sources = isSeq(value) ? value.items.map((item) => this.deref(item as YamlNode | null)) : [value];
-    return sources.every((s) => isMap(s)) ? (sources as YAMLMap[]) : undefined;
+    return sources.every((s) => isMap(s)) ? sources : undefined;
   }
 
   /**

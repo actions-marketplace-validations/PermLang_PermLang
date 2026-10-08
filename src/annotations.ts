@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Reads `@perm` tags from JSDoc comments.
 //
 // The raw comment text is scanned instead of relying on the TypeScript JSDoc
@@ -6,6 +9,7 @@
 
 import { ts, type Node, type SourceFile } from "ts-morph";
 import { parsePermList, type Capability } from "./capability.js";
+import { lineIndex, lineStarts } from "./lines.js";
 import { forEachDescendant, lineAndColumn } from "./walk.js";
 
 export interface AnnotationError {
@@ -48,7 +52,10 @@ const LINE_START = /(?:^|\n)[ \t]*(?:\/\*\*)?[ \t]*\*?[ \t]*(?:@(?:module|file|f
 
 /** Matches of `tag` that begin a line, so prose that mentions a tag (a `@perm` tag) is ignored. */
 function blockTags(text: string, tag: RegExp): RegExpExecArray[] {
-  return [...text.matchAll(tag)].filter((m) => LINE_START.test(text.slice(0, m.index)));
+  // From the start of the tag's own line: testing from the start of the text read it all again
+  // for each tag, and a comment can have tens of thousands.
+  const starts = lineStarts(text);
+  return [...text.matchAll(tag)].filter((m) => LINE_START.test(text.slice(starts[lineIndex(starts, m.index)], m.index)));
 }
 
 export function isModuleComment(text: string): boolean {

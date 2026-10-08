@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // The built-in adapters for Node's modules must name functions the way @types/node
 // declares them. Found in the 0.3 review: process.kill and cluster.fork are interface
 // members (Process.kill, Cluster.fork), so keys written as "kill" and "fork" never matched

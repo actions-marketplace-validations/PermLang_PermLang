@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Table names read out of a literal SQL statement, for raw-SQL database clients.
 //
 // This fails closed. It gives a definite answer only for one SELECT, INSERT,

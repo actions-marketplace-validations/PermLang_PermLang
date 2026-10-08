@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // The capability vocabulary and the rules for when a declared permission covers
 // an actual use. Names are language-neutral so future analyzers can share them.
 // Adapter manifests extend the vocabulary with app-level names like email.send.

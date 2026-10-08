@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Data-flow rules: "env(STRIPE_KEY) may only go to net(api.stripe.com)". A function that
 // gets hold of the source (reads it, or calls something that reads it and can hand it
 // back) and can send to any other host, run a command, or run code that can't be

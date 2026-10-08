@@ -1,6 +1,9 @@
-// Prisma, the first database client with built-in support (design doc open
-// question 2). Prisma generates one `<Model>Delegate` interface per model; the
-// table in db.read/db.write is the model's accessor name, e.g. `prisma.lead`.
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
+// Prisma, the first database client with built-in support. Prisma generates one
+// `<Model>Delegate` interface per model; the table in db.read/db.write is the model's
+// accessor name, e.g. `prisma.lead`.
 // Related tables reached through `include`, `where`, nested writes, and the fluent
 // API (`prisma.user.findUnique(...).posts()`) are read from the arguments
 // (prisma-args.ts).
@@ -100,7 +103,7 @@ function interceptedQuery(declaration: Node, call: CallLike | undefined): Capabi
   const holder = Node.isCallExpression(call) && Node.isFunctionTypeNode(declaration) ? queryHolder(call) : undefined;
   const literal = (key: string) => {
     const type = holder?.getProperty(key)?.getTypeAtLocation(call!);
-    return type?.isStringLiteral() ? String(type.getLiteralValue()) : undefined;
+    return type?.isStringLiteral() ? type.getLiteralValue() as string : undefined;
   };
   const model = literal("model");
   const operation = literal("operation");
@@ -135,7 +138,7 @@ function isQueryRunner(declaration: Node): boolean {
   if (!INTERCEPTED.has(containerName(declaration) ?? "")) return false;
   const holder = Node.isFunctionTypeNode(declaration) ? declaration.getParent() : declaration;
   const name = Node.isPropertySignature(holder) || Node.isParameterDeclaration(holder) ? holder.getName() : undefined;
-  return (name === "query" || name === "next") && holder!.getType().getCallSignatures().length > 0;
+  return (name === "query" || name === "next") && holder.getType().getCallSignatures().length > 0;
 }
 
 /** A variable, parameter, or destructured name of the project's that holds a query extension's `query`. */
@@ -262,7 +265,7 @@ function runtimeModel(type: Type, at: Node): { model: Model; fluent: boolean } |
     const [typeMap, model] = t.getAliasTypeArguments() as [Type, Type];
     // After a list relation, the fluent API names no model.
     if (!model.isStringLiteral()) continue;
-    const name = String(model.getLiteralValue());
+    const name = model.getLiteralValue() as string;
     const member = (of: Type | undefined, key: string) => of?.getProperty(key)?.getTypeAtLocation(at);
     const payload = member(member(member(typeMap, "model"), name), "payload");
     return { model: { table: accessor(name), payload }, fluent: alias === "DynamicModelExtensionFluentApi" };

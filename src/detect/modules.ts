@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Loading a module by name at runtime. TypeScript types most loads, so calls on what
 // they load resolve like any other call. These forms it can't see through:
 //   - require(x) in TypeScript, and import(x) when x isn't written as a literal (a

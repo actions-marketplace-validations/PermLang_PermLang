@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Property-based tests. Each states a rule that must hold for every input; fast-check generates
 // hundreds of inputs, hostile ones included, and shrinks any failure to the smallest case. They
 // cover the code where a wrong answer is a security problem: escaping untrusted text into GitHub
@@ -32,7 +35,7 @@ const hostile = fc.oneof(
 describe("output for GitHub", () => {
   const root = path.resolve("/repo");
   const report = (diagnostics: Diagnostic[]): Report =>
-    ({ files: 1, functions: [], units: [], diagnostics, unsafe: [], unmapped: [], unresolved: [], tools: [] }) as Report;
+    ({ files: 1, functions: [], units: [], diagnostics, unsafe: [], unmapped: [], unresolved: [], tools: [] });
   const item = fc
     .record({
       severity: fc.constantFrom("error" as const, "warning" as const),
@@ -89,15 +92,16 @@ describe("output for GitHub", () => {
         const rules = run.tool.driver.rules as { id: string; shortDescription: { text: unknown } }[];
         expect(new Set(rules.map((r) => r.id)).size).toBe(rules.length);
         expect(run.results).toHaveLength(items.length);
-        run.results.forEach((r: { ruleId: string; ruleIndex: number; locations: any[] }, n: number) => {
+        type Location = { physicalLocation: { artifactLocation: { uri: string }; region: { startLine: number; startColumn: number } } };
+        run.results.forEach((r: { ruleId: string; ruleIndex: number; locations: Location[] }, n: number) => {
           const { file, d } = items[n]!;
           expect(r.ruleId).toBe(d.code);
           expect(rules[r.ruleIndex]!.id).toBe(r.ruleId);
           expect(typeof rules[r.ruleIndex]!.shortDescription.text).toBe("string");
-          const { artifactLocation, region } = r.locations[0].physicalLocation;
+          const { artifactLocation, region } = r.locations[0]!.physicalLocation;
           // A URI: only unreserved characters and `/` stay as they are; each segment decodes back.
           expect(artifactLocation.uri).toMatch(/^[\w.~%!*'()/-]*$/);
-          const decoded = (artifactLocation.uri as string).split("/").map(decodeURIComponent).join("/");
+          const decoded = artifactLocation.uri.split("/").map(decodeURIComponent).join("/");
           expect([decoded, region.startLine, region.startColumn]).toEqual([file, d.line, d.column]);
         });
       }),
@@ -450,7 +454,7 @@ describe("lock file", () => {
       fc.property(lock, (l) => {
         const read = parseLock(serializeLock(l), "permlang.lock.json");
         expect(read.permlang).toBe(2);
-        expect(ownEntries(read.functions)).toEqual(ownEntries(l.functions).map(([k, caps]) => [k, [...caps].sort()]).sort(([a], [b]) => (a < b ? -1 : 1)));
+        expect(ownEntries(read.functions)).toEqual(ownEntries(l.functions).map(([k, caps]) => [k, [...caps].sort()] as const).sort(([a], [b]) => (a < b ? -1 : 1)));
         expect(ownEntries(read.unsafe).sort()).toEqual([...ownEntries(l.unsafe)].sort());
         expect(serializeLock(parseLock(serializeLock(read), "permlang.lock.json"))).toBe(serializeLock(read));
       }),
@@ -730,7 +734,7 @@ describe("project configuration", () => {
     fc.assert(
       fc.property(scripts, (s) => {
         const entry = inventory("package.json", JSON.stringify({ name: "app", scripts: s }, null, 2));
-        const expected = Object.entries(s).filter(([, command]) => typeof command === "string").map(([n, command]) => `npm.script(${n}: ${command})`);
+        const expected = Object.entries(s).flatMap(([n, command]) => (typeof command === "string" ? [`npm.script(${n}: ${command})`] : []));
         expect(new Set(entry?.actual ?? [])).toEqual(new Set(expected));
       }),
       { numRuns: 60 },

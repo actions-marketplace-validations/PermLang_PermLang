@@ -1,13 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // `permlang init`: the day-one setup for an existing project. Runs the CLI in a
 // temporary directory.
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
+import { importDependencies } from "../src/dependencies.js";
+import { permLangSteps } from "../src/lock-moves.js";
 import { runCli } from "./run-cli.js";
 import { removeTemporary } from "./temporary.js";
 
@@ -179,14 +184,58 @@ describe("permlang init", () => {
 // isn't; names YAML read as something else; and two folders sharing one workflow file.
 describe("permlang init --workflow", () => {
   /** The PermLang step's inputs, and the workflow's name, as GitHub reads the file. */
+  type Step = { name?: string; uses?: string; run?: string; "working-directory"?: string; with?: Record<string, string | number | boolean> };
+  type Job = { needs?: string; if?: string; permissions?: Record<string, string>; steps: Step[] };
+  const workflowOf = (file: string) =>
+    parse(readFileSync(path.join(dir, ".github", "workflows", file), "utf8")) as { name: string; permissions: Record<string, string>; jobs: { dependencies: Job; permissions: Job } };
   const read = (file: string) => {
-    const workflow = parse(readFileSync(path.join(dir, ".github", "workflows", file), "utf8")) as {
-      name: string;
-      jobs: { permissions: { steps: { uses?: string; run?: string; "working-directory"?: string; with?: Record<string, string> }[] } };
-    };
-    const steps = workflow.jobs.permissions.steps;
-    return { name: workflow.name, inputs: steps.find((s) => s.uses?.startsWith("PermLang/"))!.with ?? {}, install: steps.filter((s) => s.run && /install|npm ci/.test(s.run) && !s.run.includes("corepack")).at(-1)! };
+    const workflow = workflowOf(file);
+    const install = workflow.jobs.dependencies.steps.filter((s) => s.run && /install|npm ci/.test(s.run) && !s.run.includes("corepack")).at(-1)!;
+    return { name: workflow.name, inputs: (workflow.jobs.permissions.steps.find((s) => s.uses?.startsWith("PermLang/"))!.with ?? {}) as Record<string, string>, install };
   };
+
+  // Installing ran in the job that checks, before the check: pnpm's .pnpmfile.cjs, Yarn's yarnPath
+  // and plugins, and the program a project .npmrc names as `git` all run code the pull request
+  // controls, which could change what the check runs or reports (GHSA-chh9-p8fq-3gf9).
+  it("installs in a job of its own, and runs nothing from the pull request in the job that checks", () => {
+    writeFileSync(path.join(dir, "pnpm-lock.yaml"), "");
+    permlang("init", "src", "--workflow");
+    const { permissions, jobs } = workflowOf("permlang.yml");
+    expect(permissions).toEqual({ contents: "read" });
+    // The installing job: the package manager, then every node_modules folder packed and uploaded.
+    const install = jobs.dependencies;
+    expect(install.permissions).toBeUndefined();
+    expect(install.steps.map((s) => s.uses ?? s.name ?? s.run)).toEqual([
+      "actions/checkout@v7",
+      "actions/setup-node@v7",
+      "npm install --global corepack@latest",
+      "corepack enable",
+      "pnpm install --frozen-lockfile --ignore-scripts",
+      "Pack the dependencies for the check",
+      "actions/upload-artifact@v7",
+    ]);
+    const upload = install.steps.at(-1)!.with!;
+    // The check: after it, with only a checkout and PermLang, which brings in what it uploaded.
+    const check = jobs.permissions;
+    expect(check.needs).toBe("dependencies");
+    expect(check.permissions).toEqual({ contents: "read", "pull-requests": "write" });
+    expect(check.steps.map((s) => s.uses)).toEqual(["actions/checkout@v7", "PermLang/permlang@v0"]);
+    expect(check.steps.some((s) => s.run !== undefined)).toBe(false);
+    expect(check.steps[1]!.with!.dependencies).toBe(upload.name);
+    // Neither checkout leaves the token in the repository's git config.
+    for (const job of [install, check]) expect(job.steps[0]!.with).toEqual({ "persist-credentials": false });
+  });
+
+  // When the installing job failed, GitHub skipped the check's job, which needs it, and a skipped
+  // job counts as passed, also as a required check: a pull request could fail the install on
+  // purpose, and skip its own check (GHSA-86ff-3f4h-rrjp). The check's job runs always, and fails
+  // without the dependencies; the rule for moved lock files still counts it as sure to run.
+  it("runs the check even when installing fails", () => {
+    permlang("init", "src", "--workflow");
+    expect(workflowOf("permlang.yml").jobs.permissions.if).toBe("always()");
+    const read = (file: string) => (existsSync(path.join(dir, file)) ? readFileSync(path.join(dir, file), "utf8") : undefined);
+    expect(permLangSteps([".github/workflows/permlang.yml"], read)).toEqual([expect.objectContaining({ surelyRuns: true })]);
+  });
   /** The check the Action runs, with the workflow's args split on spaces as it splits them. */
   const actionCheck = (inputs: Record<string, string>) => runCli(["check", ...(inputs.args ?? "").split(/\s+/).filter(Boolean)], { cwd: path.join(dir, inputs["working-directory"] ?? ".") });
 
@@ -359,5 +408,33 @@ describe("permlang init --workflow", () => {
       expect(out).toMatch(new RegExp(`^\\.github/workflows has workflows that run PermLang in other folders under both names this one would get \\(permlang-packages-web\\.yml, and with -${hash}\\)\\. Add a PermLang step for packages_web to one of them\\.`));
       expect(readdirSync(web)).toEqual(["src"]);
     });
+  });
+});
+
+// The installing job's pack command, run as written, makes an archive the check's job imports.
+describe.skipIf(process.platform === "win32")("the workflow's two jobs", () => {
+  it("pass every node_modules folder, links and all, from one to the other", () => {
+    writeFileSync(path.join(dir, "package-lock.json"), "");
+    permlang("init", "src", "--workflow");
+    const workflow = parse(readFileSync(path.join(dir, ".github", "workflows", "permlang.yml"), "utf8")) as { jobs: { dependencies: { steps: { name?: string; run?: string }[] } } };
+    const pack = workflow.jobs.dependencies.steps.find((s) => s.name === "Pack the dependencies for the check")!.run!;
+    // As the installing job leaves them: a package, a link pnpm-style, and a workspace package's own folder.
+    mkdirSync(path.join(dir, "node_modules", ".store", "left-pad"), { recursive: true });
+    writeFileSync(path.join(dir, "node_modules", ".store", "left-pad", "index.d.ts"), "export declare function leftPad(s: string): string;\n");
+    symlinkSync(".store/left-pad", path.join(dir, "node_modules", "left-pad"));
+    mkdirSync(path.join(dir, "src", "node_modules", "local"), { recursive: true });
+    writeFileSync(path.join(dir, "src", "node_modules", "local", "index.d.ts"), "export {};\n");
+    const temp = mkdtempSync(path.join(tmpdir(), "permlang-pack-"));
+    try {
+      execFileSync("bash", ["-c", pack], { cwd: dir, env: { ...process.env, RUNNER_TEMP: temp } });
+      // A fresh checkout of the same commit, without them.
+      const fresh = path.join(temp, "checkout");
+      mkdirSync(path.join(fresh, "src"), { recursive: true });
+      expect(importDependencies({ archive: path.join(temp, "dependencies.tar"), root: fresh, temp })).toEqual(["node_modules", "src/node_modules"]);
+      expect(readFileSync(path.join(fresh, "node_modules", "left-pad", "index.d.ts"), "utf8")).toContain("leftPad");
+      expect(lstatSync(path.join(fresh, "node_modules", "left-pad")).isSymbolicLink()).toBe(true);
+    } finally {
+      removeTemporary(temp);
+    }
   });
 });

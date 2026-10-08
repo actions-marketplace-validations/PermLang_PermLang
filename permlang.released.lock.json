@@ -10,11 +10,17 @@
       "ci.trigger(pull_request)",
       "ci.trigger(push)"
     ],
+    ".github/workflows/dependency-review.yml#<dependency-review.yml>": [
+      "ci.action(actions/dependency-review-action)",
+      "ci.permission(contents: read)",
+      "ci.trigger(pull_request)"
+    ],
     ".github/workflows/permlang.yml#<permlang.yml>": [
       "ci.action(./)",
       "ci.action(PermLang/permlang)",
       "ci.action(actions/checkout)",
       "ci.action(actions/setup-node)",
+      "ci.action(actions/upload-artifact)",
       "ci.permission(contents: read)",
       "ci.permission(pull-requests: write)",
       "ci.permission(security-events: write)",
@@ -43,17 +49,25 @@
       "ci.trigger(schedule)",
       "ci.trigger(workflow_dispatch)"
     ],
+    ".github/workflows/sign-off.yml#<sign-off.yml>": [
+      "ci.action(actions/checkout)",
+      "ci.permission(contents: read)",
+      "ci.trigger(pull_request)"
+    ],
     "action.yml#<action.yml>": [
       "ci.action(actions/cache/restore)",
       "ci.action(actions/cache/save)",
+      "ci.action(actions/download-artifact)",
       "ci.action(actions/setup-node)",
       "ci.action(github/codeql-action/upload-sarif)"
     ],
     "package.json#<package.json>": [
       "npm.script(build: node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json)",
+      "npm.script(lint: eslint .)",
       "npm.script(permlang: tsx src/cli.ts)",
       "npm.script(permlang:released: node scripts/permlang-released.mjs)",
       "npm.script(prepublishOnly: npm run typecheck && npm test && npm run build)",
+      "npm.script(sbom: node scripts/sbom.mjs)",
       "npm.script(test: vitest run)",
       "npm.script(test:coverage: vitest run --coverage)",
       "npm.script(test:watch: vitest)",
@@ -82,12 +96,45 @@
       "fs.read"
     ],
     "src/cli.ts#<module>": [
+      "env(GITHUB_ACTIONS)",
       "env(GITHUB_WORKSPACE)",
       "exec",
       "fs.read",
       "fs.read(package.json)",
       "fs.read(permlang.config.json)",
       "fs.read(tsconfig.json)",
+      "fs.write"
+    ],
+    "src/dependencies.ts#checkDestination": [
+      "fs.read"
+    ],
+    "src/dependencies.ts#foldersIn": [
+      "fs.read"
+    ],
+    "src/dependencies.ts#importCommand": [
+      "exec",
+      "fs.read",
+      "fs.write"
+    ],
+    "src/dependencies.ts#importDependencies": [
+      "exec",
+      "fs.read",
+      "fs.write"
+    ],
+    "src/dependencies.ts#importUnpacked": [
+      "fs.read",
+      "fs.write"
+    ],
+    "src/dependencies.ts#move": [
+      "fs.read",
+      "fs.write"
+    ],
+    "src/dependencies.ts#unpack": [
+      "exec"
+    ],
+    "src/import-dependencies.ts#<module>": [
+      "exec",
+      "fs.read",
       "fs.write"
     ],
     "src/init-workflow.ts#canonical": [
@@ -235,6 +282,7 @@
       "exec"
     ],
     "src/main.ts#main": [
+      "env(GITHUB_ACTIONS)",
       "env(GITHUB_WORKSPACE)",
       "exec",
       "fs.read",
@@ -258,6 +306,9 @@
       "fs.read",
       "fs.read(permlang.config.json)",
       "fs.read(tsconfig.json)"
+    ],
+    "src/main.ts#stopCommands": [
+      "env(GITHUB_ACTIONS)"
     ],
     "src/main.ts#writeText": [
       "fs.write"

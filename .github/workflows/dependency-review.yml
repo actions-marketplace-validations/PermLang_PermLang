@@ -1,0 +1,24 @@
+name: Dependency review
+
+# Fails a pull request that adds or updates a dependency (an npm package, or a GitHub Action)
+# with a known vulnerability of any severity, or under a license that isn't listed below.
+# docs/policies.md says how a finding that can't affect PermLang is allowed, and why.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: low
+          # Licenses that allow PermLang to be distributed under Apache 2.0. MPL-2.0 is there for
+          # lightningcss, which Vitest uses; it isn't part of the published package.
+          allow-licenses: >-
+            0BSD, Apache-2.0, BlueOak-1.0.0, BSD-2-Clause, BSD-3-Clause, CC0-1.0, CC-BY-4.0,
+            ISC, MIT, MIT-0, MPL-2.0, Python-2.0, Unlicense

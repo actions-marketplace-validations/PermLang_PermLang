@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Raw-SQL database clients: pg, mysql2, better-sqlite3, sqlite3, postgres (postgres.js),
 // @neondatabase/serverless, @vercel/postgres, and Node's own node:sqlite. When the query is literal text, its
 // tables are read out of it (`SELECT ... FROM leads` → db.read(leads)). SQL built

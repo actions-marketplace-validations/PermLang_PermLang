@@ -1,0 +1,10 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/PermLang/PermLang/blob/main/permlang.openvex.json",
+  "author": "The PermLang maintainers",
+  "role": "Project maintainers",
+  "timestamp": "2026-10-07T00:00:00Z",
+  "version": 1,
+  "tooling": "Written by hand, as SECURITY.md describes",
+  "statements": []
+}

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Built-in adapters for third-party packages, checked against stand-ins shaped like
 // each package's real typings: the declaration a call resolves to decides which
 // adapter entry applies, so the stand-ins keep the real names and shapes (classes,

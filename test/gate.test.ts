@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // The review gate: a pull request mustn't be able to add access, or loosen the check, without the
 // check failing and the comment showing it. Each case below is a way the code review found to get
 // past it (G1–G10, O2, O3, O5). Runs the CLI in a temporary git repository, as the Action would.

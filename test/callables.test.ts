@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Calls through a function type that more than one function can be behind: a callable
 // interface or type alias (`interface Runner { (cmd: string): void }`), or the function
 // type of a collection's entries (`Map<string, (cmd: string) => void>`, `Handler[]`).
@@ -200,6 +203,7 @@ describe("an anonymous function reached through its type", () => {
 // whose call needed the list.
 describe("an expression TypeScript can't type", () => {
   it("is left out, and the other functions written against the type are still found", () => {
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- kept to call with .call(this) once it's replaced
     const getContextualType = Expression.prototype.getContextualType;
     const failing = vi.spyOn(Expression.prototype, "getContextualType").mockImplementation(function (this: Expression) {
       if (this.getText().includes("broken")) throw new RangeError("Maximum call stack size exceeded");

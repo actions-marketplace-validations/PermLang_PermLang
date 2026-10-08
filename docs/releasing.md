@@ -16,17 +16,23 @@ The npm package is `permlang`, owned by the npm user `parkweb`, with the
    `npm run permlang:released -- lock src --lock permlang.released.lock.json`
    and commit the lock, if the new release sees PermLang's code differently.
 
-The [release workflow](../.github/workflows/release.yml) runs in two jobs:
+The [release workflow](../.github/workflows/release.yml) runs in three jobs:
 
 1. **Build**, with read-only access: checks that the tag matches
    `package.json` and that the release commit is on `main`, installs the
    dependencies without running their install scripts (which could change the
    package before it's packed, and none of which the build or the tests need),
    runs the tests, and packs the package.
-2. **Publish**, which installs nothing, so no dependency's code ever runs with
-   the right to publish: signs a build provenance attestation for that tarball,
-   publishes the same tarball to npm with provenance, attaches it and the
-   attestation to the GitHub release, and moves the `v0` tag.
+2. **SBOM**, also read-only, and apart from the build so nothing it installs can
+   touch the package: makes the software bill of materials,
+   `permlang-<version>.cdx.json`, with `npm run sbom` (every package installing
+   PermLang installs, at the version the lockfile pins), and fails if it doesn't
+   match `package-lock.json`.
+3. **Publish**, which installs nothing, so no dependency's code ever runs with
+   the right to publish: signs a build provenance attestation for that tarball
+   and an attestation that the SBOM describes it, publishes the same tarball to
+   npm with provenance, attaches the tarball, its provenance and the SBOM to the
+   GitHub release, and moves the `v0` tag.
 
 Releases run one at a time: a release made while another is running waits for
 it. GitHub keeps only one waiting run, though, so a third release made while

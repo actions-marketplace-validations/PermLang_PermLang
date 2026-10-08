@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // `window.fetch` and `self.fetch` resolve to lib.dom's WindowOrWorkerGlobalScope.fetch, not to the
 // global function, so they need their own match. The conformance fixtures share one project
 // without lib.dom, which is why this runs as a separate project.

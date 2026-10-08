@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Adversarial suite from the v0.1 launch review: ways an edit (human or AI) might reach a
 // capability without a diagnostic. Every case under "caught" must stay caught. Every case under
 // "silent" is harmless and must produce no diagnostics at all. Every case under "known misses"

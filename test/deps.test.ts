@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // New dependencies in the permission diff: a package added in a pull request can do
 // anything, so the comment lists it, what PermLang knows about it, and its install scripts.
 

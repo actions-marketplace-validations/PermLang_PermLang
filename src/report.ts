@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Human-readable, JSON, GitHub annotation, and SARIF output for a check report.
 
 import path from "node:path";

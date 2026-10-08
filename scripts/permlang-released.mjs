@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Runs the release of PermLang that .github/workflows/permlang.yml checks this repository with
 // (its `released` job), for permlang.released.lock.json:
 //

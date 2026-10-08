@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Dynamic dispatch. A call through an interface, a base class, or a structural
 // type may run any implementation of that member. This charges the caller with
 // every first-party implementation:
@@ -205,7 +208,7 @@ function functionPassed(id: Identifier): { expression: Expression; unit: Node } 
 
 function isContextuallyTyped(expression: Node): boolean {
   const outer = expression.getParentOrThrow();
-  if (Node.isCallExpression(outer) || Node.isNewExpression(outer)) return (outer.getArguments() as Node[]).includes(expression);
+  if (Node.isCallExpression(outer) || Node.isNewExpression(outer)) return outer.getArguments().includes(expression);
   if (Node.isPropertyAssignment(outer) || Node.isVariableDeclaration(outer)) return outer.getInitializer() === expression;
   if (Node.isBinaryExpression(outer)) return outer.getRight() === expression && outer.getOperatorToken().getKind() === SyntaxKind.EqualsToken;
   if (Node.isArrowFunction(outer)) return outer.getBody() === expression;

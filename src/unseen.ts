@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Code PermLang can't see into: calls through an import whose types can't be found, names
 // with no declaration at all (`process` or `fetch` without their types), and calls through a
 // value typed `any`. Nothing they do is detected, so `permlang spec` can't say an

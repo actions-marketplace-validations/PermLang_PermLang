@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // GitHub Actions expressions (`${{ ... }}`), read the way GitHub reads them: found with
 // its own scan of a string, split into tokens by the same rules as its lexer (in
 // actions/languageservices), and with context and property names in any case.

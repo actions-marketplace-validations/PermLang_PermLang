@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Node's own SQLite client, node:sqlite (Node 22.5 and later), checked against the
 // project's own @types/node (24): DatabaseSync and StatementSync take SQL text like
 // better-sqlite3's, and a tag store runs tagged templates. Before, it was only listed

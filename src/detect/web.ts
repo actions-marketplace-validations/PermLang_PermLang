@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Built-in APIs matched in code rather than by an adapter. They come from the
 // TypeScript lib, @types/node, or undici-types (the types of Node's web globals),
 // which have no adapter, and each needs more than a name match:

@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Tools given to AI models. A function registered as a tool can be called by whoever
 // controls the model's input, so prompt injection can trigger anything the tool reaches.
 // PermLang finds tool registrations, works out what each handler reaches, and warns when
 // a model can trigger something dangerous.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";

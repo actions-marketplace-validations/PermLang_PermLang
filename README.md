@@ -11,6 +11,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/PermLang/PermLang/badge)](https://scorecard.dev/viewer/?uri=github.com/PermLang/PermLang)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15173/badge)](https://www.bestpractices.dev/projects/15173)
+[![OpenSSF Baseline](https://www.bestpractices.dev/projects/15173/baseline)](https://www.bestpractices.dev/projects/15173)
 [![Permissions: checked by PermLang](https://img.shields.io/badge/permissions-checked%20by%20PermLang-2B3BFF)](https://github.com/PermLang/PermLang)
 
 A safety check for TypeScript projects. It notices when a change makes your code
@@ -170,8 +171,11 @@ PermLang's own repository runs CodeQL too.
 **Does it run my code or send it anywhere?**
 No. It reads your source with the TypeScript compiler and never runs it. Your
 code stays on your machine or CI runner: the command-line tool makes no network
-calls, and the GitHub Action only posts its results to the pull request (and to
-code scanning, if you turn that on).
+calls. The GitHub Action downloads what it needs to build PermLang (from npm),
+and sends GitHub only its results, which quote short lines of code, for the
+pull-request comment and annotations (and code scanning, if you turn that on).
+The workflow `init` writes passes your installed packages, not your code, from
+the job that installs them to the job that checks, as an artifact kept for a day.
 
 **Is it free?**
 Yes. PermLang is open source under the Apache 2.0 license.
@@ -185,6 +189,9 @@ Yes. PermLang is open source under the Apache 2.0 license.
 | 🧪 [Real-world trial](docs/trial-2026-09.md) | Results on two open-source apps, Umami and Ghostfolio |
 | 📝 [Spec format](docs/spec-format.md) | Early work on describing business rules alongside permissions |
 | 🗒️ [Changelog](CHANGELOG.md) | What changed, release by release |
+| 🏗️ [Design](docs/design.md) | How it's put together, and every interface it has |
+| 🛡️ [Threat model](docs/threat-model.md) | What could go wrong, the defences, and the vulnerabilities found so far |
+| 🧭 [Roadmap](ROADMAP.md), [governance](GOVERNANCE.md), [policies](docs/policies.md) | Where it's going, who decides, and the rules every change follows |
 
 ## License
 

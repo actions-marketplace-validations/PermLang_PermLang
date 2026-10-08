@@ -5,9 +5,11 @@ name: Release
 # settings must list this repository and workflow as a trusted publisher.
 # See docs/releasing.md.
 #
-# Two jobs. `build` installs, tests, and packs with read-only access, so no
-# dependency's code runs anywhere it could publish or move tags. `publish`
-# installs nothing: it attests, publishes, and attaches the tarball `build` made.
+# Three jobs. `build` installs, tests, and packs with read-only access, so no
+# dependency's code runs anywhere it could publish or move tags. `sbom` lists what
+# installing the package installs, also read-only, and apart from `build`, so nothing
+# it runs can touch the package. `publish` installs nothing: it attests, publishes,
+# and attaches the package and its SBOM.
 
 on:
   release:
@@ -77,8 +79,39 @@ jobs:
           path: ${{ steps.pack.outputs.file }}
           if-no-files-found: error
 
-  publish:
+  # The software bill of materials: every package that installing this version installs, at
+  # the version the lockfile pins, checked against the lockfile (scripts/sbom.mjs).
+  sbom:
     needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      file: ${{ steps.sbom.outputs.file }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Make the SBOM
+        id: sbom
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          file="permlang-$VERSION.cdx.json"
+          npm run sbom -- "$file"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: ${{ steps.sbom.outputs.file }}
+          if-no-files-found: error
+
+  publish:
+    needs: [build, sbom]
     runs-on: ubuntu-latest
     permissions:
       contents: write # attach the package to the release, and move the v0 tag
@@ -90,6 +123,9 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: package
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -99,6 +135,13 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ needs.build.outputs.file }}
+      # Signs the SBOM as describing this package, so `gh attestation verify --predicate-type
+      # https://cyclonedx.org/bom` checks it (SECURITY.md).
+      - name: Attest the SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ needs.build.outputs.file }}
+          sbom-path: ${{ needs.sbom.outputs.file }}
       - name: Publish
         shell: bash
         env:
@@ -117,19 +160,20 @@ jobs:
             exit 1
           fi
           echo "$out"
-      - name: Attach the package and its provenance to the release
+      - name: Attach the package, its provenance, and its SBOM to the release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
           FILE: ${{ needs.build.outputs.file }}
+          SBOM: ${{ needs.sbom.outputs.file }}
           BUNDLE: ${{ steps.attest.outputs.bundle-path }}
         run: |
           # The Sigstore bundle, which `gh attestation verify --bundle` and cosign read, and the
           # signed SLSA provenance inside it (a DSSE envelope), as in-toto JSON Lines.
           cp "$BUNDLE" "$FILE.sigstore.json"
           node -e 'const [b] = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n"); console.log(JSON.stringify(JSON.parse(b).dsseEnvelope))' "$BUNDLE" > "$FILE.intoto.jsonl"
-          gh release upload "$TAG" "$FILE" "$FILE.sigstore.json" "$FILE.intoto.jsonl" --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$TAG" "$FILE" "$FILE.sigstore.json" "$FILE.intoto.jsonl" "$SBOM" --clobber --repo "$GITHUB_REPOSITORY"
       - name: Point the v0 tag at this release
         shell: bash
         env:

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // The permission-diff comment the Action posts, and the text diff, as the second round of
 // verification found them: what stays when the comment is cut to fit GitHub's limit, text
 // from the code that could still change the comment, and what the comment says about lock
@@ -189,5 +192,17 @@ describe("the text diff", () => {
     const text = formatDiffText(diffLocks(empty, empty), {}, { analysisError: "Strictness must be one of: sketch, development, production." });
     expect(text).toContain("The lock files show no permission changes, but the code wasn't analyzed.");
     expect(text).not.toContain("reach the same access");
+  });
+});
+
+// A capability an adapter names `constructor` (a name CAPABILITY_NAME allows) read Object's own
+// `constructor` from the notes and the paths, and the diff threw "function is not iterable".
+describe("names that objects have already", () => {
+  it.each(["constructor", "toString", "__proto__", "hasOwnProperty"])("are only names, in the comment and the text (%s)", (name) => {
+    const changes = diffLocks(empty, lock({ [`src/a.ts#${name}`]: [name, "net"] }));
+    expect(() => formatDiffMarkdown(changes, {}, { aiTools: {} })).not.toThrow();
+    expect(() => formatDiffText(changes, {}, { aiTools: {} })).not.toThrow();
+    expect(formatDiffMarkdown(changes, {}, { aiTools: {} })).not.toContain("AI model");
+    expect(formatDiffText(changes, {}, {})).toContain(`+ ${name}`);
   });
 });

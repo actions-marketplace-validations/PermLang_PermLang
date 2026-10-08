@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // PermLang specs (phase 2 groundwork): rules, examples, and permissions for one
 // piece of logic in one language-neutral file. Today the permissions are checked
 // against the implementation; rules and examples are parsed and reported as not

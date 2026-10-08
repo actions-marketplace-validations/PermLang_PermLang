@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // What the check runs with, recorded in the lock. A pull request can loosen the check without
 // touching code: lower the strictness, trust packages with no adapter, add an adapter that
 // declares a package pure, drop a flow rule, narrow tsconfig.json's "include", or check other
@@ -130,7 +133,7 @@ export function settingsEntries(settings: Settings, root: string, imported: read
   for (const a of settings.adapters) {
     entry.add(`permlang.adapter(${relative(root, a.file)} sha256:${contentHash(a.file)})`, a.from === "option" ? "--adapter" : name, a.from === "config" ? lineOf("adapters") : 1);
   }
-  return "project" in scope ? [entry.report(), tsconfigEntry(scope.project, root)] : [entry.report()];
+  return "project" in scope ? [entry.report(), tsconfigEntry(scope.project)] : [entry.report()];
 }
 
 // --- tsconfig.json -----------------------------------------------------------------
@@ -166,7 +169,7 @@ export function readTsConfig(file: string): ts.ParsedCommandLine {
  * globals resolve to. Narrowing "include" hides code; mapping `paths` or emptying `types` can
  * make an import or a global resolve to nothing, which PermLang can't see into.
  */
-function tsconfigEntry(file: string, root: string): FunctionReport {
+function tsconfigEntry(file: string): FunctionReport {
   const parsed = readTsConfig(file);
   const dir = path.dirname(path.resolve(file));
   const name = path.basename(file);

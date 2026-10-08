@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // A module's exported constants, read by name in other files, are fixed only where the module's
 // namespace object is: in CommonJS, `import * as config` is the module's `exports` object, so
 // writing to it changes what every importer reads; an ES module's namespace can't be written.

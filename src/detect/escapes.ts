@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Capabilities hidden behind `any`: `(globalThis as any).fetch(url)`,
 // `(childProcess as any)["exec"]("ls")`, `const m: any = childProcess`.
 //

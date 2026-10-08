@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // The GitHub Action's own scripts (action.yml), run with bash as the runner would, against a real
 // git repository and a stand-in for the `gh` command. They decide whether the check requires the
 // lock, and which comment the permission diff replaces, so they're tested like the rest
@@ -10,6 +13,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
+import { writeTar } from "./tar.js";
 import { removeTemporary } from "./temporary.js";
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
@@ -184,6 +188,43 @@ describe.skipIf(!bash)("the Action's base-commit lookup", () => {
     }
   });
 
+  // A checkout that didn't keep its token (persist-credentials: false, as in the workflow init
+  // writes) couldn't fetch the base from a private repository, so the moved-lock rule and the
+  // diff didn't run (found by running that workflow end to end, in a private repository).
+  // Git for Windows' bash puts its own folders first on the PATH, so a stand-in git can't come first there.
+  it.skipIf(process.platform === "win32")("fetches with the Action's token, kept nowhere, when a fetch without it is refused", () => {
+    base();
+    const shallow = path.join(dir, "shallow");
+    execFileSync("git", ["clone", "-q", "--depth=1", pathToFileURL(origin).href, shallow]);
+    git("commit", "-q", "--allow-empty", "-m", "later");
+    git("push", "-q", "origin", "HEAD:refs/heads/main");
+    const later = git("rev-parse", "HEAD");
+    // A remote that refuses a fetch without the token, as a private repository's does. The header
+    // it gets is written down, to check.
+    const real = execFileSync(bash!, ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    const headers = path.join(temp, "headers.txt");
+    mkdirSync(path.join(temp, "bin"), { recursive: true });
+    writeFileSync(
+      path.join(temp, "bin", "git"),
+      [
+        "#!/bin/sh",
+        'if [ "$1" = -c ]; then printf "%s\\n" "$2" >> "' + headers.replaceAll("\\", "/") + '"; shift 2; exec "' + real + '" "$@"; fi',
+        'case " $* " in *" fetch "*) echo "fatal: could not read Username: terminal prompts disabled" >&2; exit 128 ;; esac',
+        'exec "' + real + '" "$@"',
+        "",
+      ].join("\n"),
+    );
+    chmodSync(path.join(temp, "bin", "git"), 0o755);
+    const { code, outputs } = run("Look up the base commit", { BASE_SHA: later, TOKEN: "ghs_test-token" }, shallow);
+    expect(code).toBe(0);
+    expect(outputs.fetched).toBe("true");
+    expect(readFileSync(headers, "utf8").trim()).toBe(`http.extraheader=AUTHORIZATION: basic ${Buffer.from("x-access-token:ghs_test-token").toString("base64")}`);
+    expect(execFileSync("git", ["cat-file", "-t", later], { cwd: shallow, encoding: "utf8" }).trim()).toBe("commit");
+    expect(readFileSync(path.join(shallow, ".git", "config"), "utf8")).not.toContain("ghs_test-token");
+    // Without a token, it still warns, and the lock is required.
+    expect(run("Look up the base commit", { BASE_SHA: "0".repeat(40), TOKEN: "" }, shallow).outputs.fetched).toBe("false");
+  });
+
   it("gives each folder its own code-scanning category", () => {
     const sha = base();
     mkdirSync(path.join(work, "packages", "api"), { recursive: true });
@@ -313,6 +354,19 @@ describe.skipIf(!bash)("the Action's comment", () => {
     expect(sent("patched")).toMatch(/^<!-- permlang-diff -->\n### PermLang permission diff\n\n> \[!CAUTION\]\n> \*\*PermLang couldn't compute the permission diff\*\*/);
   });
 
+  // A diff that died without printing (out of memory, killed) only warned, and the comment went on
+  // showing an earlier push's diff as if it were current (found by the threat model).
+  it("fails, rather than leave an earlier push's comment standing, when the diff prints nothing", () => {
+    fakeGh({ comments: ["103\tgithub-actions[bot]\t<!-- permlang-diff -->"] });
+    const crash = path.join(temp, "crash.mjs");
+    writeFileSync(crash, "process.exit(137);\n");
+    const { code, out } = run("Comment the permission diff", env({ PERMLANG: crash }));
+    expect(code).toBe(1);
+    expect(out).toContain("PermLang's diff printed nothing");
+    expect(sent("patched")).toBeUndefined();
+    expect(sent("posted")).toBeUndefined();
+  });
+
   it("reads the lock --lock names", () => {
     fakeGh({});
     git("mv", "permlang.lock.json", "custom.json");
@@ -387,5 +441,78 @@ describe("the release workflow", () => {
     expect(installs).not.toHaveLength(0);
     for (const run of installs) expect(run).toContain("--ignore-scripts");
     expect(script("Build PermLang")).toContain("npm ci --ignore-scripts");
+  });
+});
+
+// For a pull request, GitHub looks first in that pull request's own cache, which any job that runs
+// for it can write to, so its code could put a build of its own under the Action's key, which the
+// Action then ran instead of PermLang (GHSA-2vhg-398w-7p59). The cache is used only for runs no
+// pull request can write to.
+describe("the Action's build cache", () => {
+  const steps = (action.runs.steps as { name: string; id?: string; if?: string; uses?: string }[]);
+  const key = steps.find((s) => s.id === "build-key")!;
+
+  it("is only looked up for pushes, and scheduled and manual runs", () => {
+    const events = JSON.parse(/^contains\(fromJSON\('(\[.*\])'\), github\.event_name\)$/.exec(key.if ?? "")?.[1] ?? "null") as string[] | null;
+    expect(events).toEqual(["push", "schedule", "workflow_dispatch"]);
+  });
+
+  it("is restored and saved only when it's looked up", () => {
+    const cacheSteps = steps.filter((s) => s.uses?.startsWith("actions/cache"));
+    expect(cacheSteps.map((s) => s.name)).toEqual(["Restore the build", "Save the build"]);
+    for (const s of cacheSteps) expect(s.if).toMatch(/^steps\.build-key\.outputs\.key != ''( && |$)/);
+  });
+
+  it("is built from source whenever it isn't restored", () => {
+    expect(steps.find((s) => s.name === "Build PermLang")!.if).toBe("steps.build-cache.outputs.cache-hit != 'true'");
+  });
+});
+
+// The check's job runs even when the job that installs fails (`if: always()`), so that it fails
+// rather than being skipped, which counts as passed (GHSA-86ff-3f4h-rrjp). There's nothing to
+// download then, and the step after says why in plain words.
+describe.skipIf(!bash)("the Action without dependencies to download", () => {
+  it("explains a failed download", () => {
+    const steps = action.runs.steps as { name: string; id?: string; if?: string }[];
+    expect(steps.find((s) => s.name === "Download the dependencies")!.id).toBe("download");
+    expect(steps.find((s) => s.name === "Explain the missing dependencies")!.if).toBe("failure() && steps.download.outcome == 'failure'");
+    expect(run("Explain the missing dependencies", {}).out).toContain("::error::There are no dependencies to download, so PermLang can't check this code.");
+  });
+});
+
+// The packages another job installed come in before the check, and only node_modules folders do
+// (GHSA-chh9-p8fq-3gf9; the archive's checks are in test/dependencies.test.ts).
+describe.skipIf(!bash || process.platform === "win32")("the Action's import of dependencies", () => {
+  const importStep = (generated = "") => run("Import the dependencies", { GENERATED: generated, IMPORT: path.join(repo, "src", "import-dependencies.ts") }, work);
+  const download = () => path.join(temp, "permlang-dependencies");
+
+  it("brings the archive's node_modules folders into the repository root", () => {
+    mkdirSync(download());
+    writeTar(path.join(download(), "dependencies.tar"), [{ type: "file", path: "node_modules/@types/x/index.d.ts", content: "export {};\n" }]);
+    const { code, out } = importStep();
+    expect(code).toBe(0);
+    expect(out).toContain("Imported node_modules.");
+    expect(existsSync(path.join(work, "node_modules", "@types", "x", "index.d.ts"))).toBe(true);
+  });
+
+  it("fails the step, and adds nothing, for an archive with anything else", () => {
+    mkdirSync(download());
+    writeTar(path.join(download(), "dependencies.tar"), [
+      { type: "file", path: "node_modules/@types/x/index.d.ts", content: "export {};\n" },
+      { type: "file", path: "src/types.d.ts", content: "declare function fetch(url: string): any;\n" },
+    ]);
+    const { code, out } = importStep();
+    expect(code).not.toBe(0);
+    expect(out).toContain("src/types.d.ts, which isn't in a node_modules folder");
+    expect(existsSync(path.join(work, "node_modules"))).toBe(false);
+    expect(existsSync(path.join(work, "src", "types.d.ts"))).toBe(false);
+  });
+
+  it("brings in the generated folders it's given, split on spaces", () => {
+    mkdirSync(download());
+    writeTar(path.join(download(), "dependencies.tar"), [{ type: "file", path: "src/generated/client.d.ts", content: "export {};\n" }, { type: "file", path: "gen/x.d.ts", content: "export {};\n" }]);
+    expect(importStep("src/generated gen").code).toBe(0);
+    expect(existsSync(path.join(work, "src", "generated", "client.d.ts"))).toBe(true);
+    expect(existsSync(path.join(work, "gen", "x.d.ts"))).toBe(true);
   });
 });

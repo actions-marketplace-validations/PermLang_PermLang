@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // The call graph between units, and propagation of capabilities along it.
 //
 // An edge is anything that can make one unit's code run another's:
@@ -494,7 +497,7 @@ const chains = new WeakMap<Reach, Map<Unit, Map<string, Chain>>>();
 
 function chainOf(reach: Reach, unit: Unit, key: string): Chain | undefined {
   let memo = chains.get(reach);
-  if (!memo) chains.set(reach, (memo = new Map()));
+  if (!memo) chains.set(reach, (memo = new Map<Unit, Map<string, Chain>>()));
   const known = (u: Unit) => memo.get(u)?.get(key);
   // Walk to the use, or to a chain already worked out, then fill in the way back.
   const walked: { unit: Unit; p: Provenance }[] = [];

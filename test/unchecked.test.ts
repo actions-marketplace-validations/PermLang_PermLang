@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Code PermLang can't check (a package with no adapter, an import with no types) is recorded in
 // the lock, so new code of that kind fails the check until it's reviewed (the gate re-verification).
 

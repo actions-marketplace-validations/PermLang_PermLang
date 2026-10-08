@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // The PermLang spec format (.perm files): rules, examples, and permissions for
 // one piece of logic, in one language-neutral file. Phase 2 groundwork: see
 // docs/spec-format.md.
@@ -75,7 +78,7 @@ export function parseSpecs(text: string, file: string, vocabulary?: ReadonlySet<
   };
 
   // Editors on Windows may save a byte-order mark, which would hide the first header.
-  text.replace(/^﻿/, "").split(/\r?\n/).forEach((raw, i) => {
+  text.replace(/^\uFEFF/, "").split(/\r?\n/).forEach((raw, i) => {
     const line = i + 1;
     const trimmed = raw.trim();
     if (trimmed === "" || trimmed.startsWith("#")) return;

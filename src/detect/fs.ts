@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Node's fs and fs/promises, classified into reads and writes with literal paths.
 // This stays custom code rather than an adapter manifest: open() depends on its
 // flags, readFile() on its `flag` option, and copies read one path and write another.

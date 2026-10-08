@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Walking a syntax tree without recursion, and finding positions in it quickly.
 //
 // ts-morph's own traversals (forEachDescendant, getDescendantsOfKind) recurse once per

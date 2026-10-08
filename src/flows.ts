@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Data-flow rules: where a secret or sensitive data may be sent.
 //
 //   "flows": [{ "from": "env(STRIPE_KEY)", "to": ["net(api.stripe.com)", "email.send"] }]
@@ -50,7 +53,7 @@ export function parseFlows(raw: unknown, source: string): FlowRule[] {
     const r = rule as { from?: unknown; to?: unknown };
     if (typeof rule !== "object" || rule === null || typeof r.from !== "string") throw new Error(`${source}: flows[${i}] needs a "from" capability, such as "env(STRIPE_KEY)".`);
     // A misspelled setting would otherwise be ignored, and the rule would check less than it says.
-    const unknown = Object.keys(rule).find((key) => key !== "from" && key !== "to");
+    const unknown = Object.keys(r).find((key) => key !== "from" && key !== "to");
     if (unknown !== undefined) throw new Error(`${source}: flows[${i}] has an unknown setting "${unknown}"; a rule has only "from" and "to".`);
     if (!Array.isArray(r.to) || !r.to.every((t) => typeof t === "string")) throw new Error(`${source}: flows[${i}]: "to" must be a list of capabilities, such as ["net(api.stripe.com)"].`);
     const from = one(r.from, `flows[${i}]: invalid "from"`, source);
@@ -58,7 +61,7 @@ export function parseFlows(raw: unknown, source: string): FlowRule[] {
       throw new Error(`${source}: flows[${i}]: "from" must be data a function can read: env, fs.read, db.read, or net, with or without a scope; "${r.from}" isn't.`);
     }
     hostOnly(from, `flows[${i}]`, source);
-    const to = (r.to as string[]).map((t) => {
+    const to = r.to.map((t) => {
       // An app capability's name is checked against the adapters later (checkFlowTargets): they aren't loaded yet.
       const name = /^\s*([^()\s]+)/.exec(t)?.[1];
       const sink = one(t, `flows[${i}]: invalid "to" entry`, source, name !== undefined && CAPABILITY_NAME.test(name) ? name : undefined);

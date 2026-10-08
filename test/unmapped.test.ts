@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Packages with no adapter are trusted: PermLang can't see what they touch
 // (design doc decision D1). The trial showed this is the largest gap in practice,
 // so every such package is listed in the report and, by default, warned about.

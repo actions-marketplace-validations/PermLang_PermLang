@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // SARIF output: `permlang check --sarif <file>` writes findings in the format GitHub's code
 // scanning reads, so they appear in the repository's Security tab next to CodeQL's.
 

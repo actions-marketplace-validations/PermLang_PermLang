@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Checks specs against the code that implements them. Phase 2 groundwork:
 //   - perms:    verified. The implementation's actual reach must stay within them
 //               (SPEC003), and unused permissions are reported (SPEC004). An
@@ -120,7 +123,7 @@ function unseenFix(reasons: readonly string[]): string {
 /** What the matched functions reach, together. A function that reaches nothing isn't in report.functions. */
 function combined(matches: readonly ReportedUnit[], report: Report): NonNullable<SpecResult["implementation"]> {
   const reports = matches.map(
-    (u) => report.functions.find((f) => f.file === u.file && f.name === u.name && f.line === u.line) ?? { file: u.file, name: u.name, actual: [] as string[], via: {} as Record<string, string[]> },
+    (u) => report.functions.find((f) => f.file === u.file && f.name === u.name && f.line === u.line) ?? { file: u.file, name: u.name, actual: [] as string[], via: {} },
   );
   if (reports.length === 1) return reports[0]!;
   return {

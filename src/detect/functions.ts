@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // What calling a declaration touches. Shared by direct calls (with their
 // arguments), functions used as values (no arguments, so every scope is
 // dynamic), and computed calls (to decide whether an object is sensitive).

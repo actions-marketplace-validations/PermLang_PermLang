@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Units are the things permissions attach to: named functions, methods,
 // constructors, accessors, function-valued variables and properties, and each
 // file's top-level code. Anonymous callbacks belong to the unit around them.

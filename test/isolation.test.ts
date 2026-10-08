@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // When analyzing one file fails, that file is reported as unverifiable and the rest of the
 // project is still checked. The failures are simulated: real ones (code nested too deeply
 // for a recursive pass) are in engine.test.ts.

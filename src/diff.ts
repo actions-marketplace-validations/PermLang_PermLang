@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // `permlang diff`: what a change adds to or removes from the lock file, written
 // for a pull-request comment (markdown) or a terminal (text). New access comes
 // first, with the path to the line that causes it when that is known. Anything
@@ -144,7 +147,7 @@ export function formatDiffMarkdown(diff: LockDiff, via: ViaPaths, notes: DiffNot
       const where = origin ? `${code(origin.fn.name)}<br><sub>${plain(origin.path.join(" → "))}</sub>` : "";
       const named = listed(functions.map((f) => `${code(f.name)}${f.status === "added" ? " (new)" : ""}`));
       // An AI model can trigger it: whoever controls the model's input can, too.
-      const tools = [...new Set(notes.aiTools?.[capability] ?? [])];
+      const tools = [...new Set(own(notes.aiTools, capability) ?? [])];
       const byModel = tools.length > 0 ? `<br><sub>⚠️ An AI model can trigger this, through ${listed(tools.map((t) => code(t)))}</sub>` : "";
       rows.push(`| ${code(`+ ${capability}`)} | ${where} | ${named}${byModel} |`);
     }
@@ -266,7 +269,7 @@ function settingRows(changes: readonly FunctionChange[], via: ViaPaths): string[
     const label = (c: string) => (c.startsWith("tsconfig.") ? `${code(change.file)} ${settingKind(c).replace(/^tsconfig\./, "")}` : (SETTING_LABEL[settingKind(c)] ?? settingKind(c)));
     const shown = (c: string) => (settingKind(c) === "project" ? `--project ${settingValue(c)}` : settingValue(c));
     const from = (c: string) => {
-      const source = via[change.key]?.[c]?.[0];
+      const source = own(own(via, change.key), c)?.[0];
       return source?.startsWith("--") ? ` <sub>(from ${code(source)})</sub>` : "";
     };
     const removed = [...change.removed];
@@ -391,8 +394,8 @@ export function formatDiffText(diff: LockDiff, via: ViaPaths, notes: DiffNotes =
     const head = `${printable(f.file)} ${printable(f.name)}${f.status === "added" ? " (new)" : f.status === "removed" ? " (removed)" : ""}`;
     const rows = [
       ...f.added.map((c) => {
-        const path = via[f.key]?.[c];
-        const tools = notes.aiTools?.[c];
+        const path = own(own(via, f.key), c);
+        const tools = own(notes.aiTools, c);
         return `  + ${printable(c)}${path ? `  via ${printable(path.join(" → "))}` : ""}${tools ? `  (an AI model can trigger this: ${printable([...new Set(tools)].join(", "))})` : ""}`;
       }),
       ...f.removed.map((c) => `  - ${printable(c)}`),
@@ -450,7 +453,7 @@ function split(diff: LockDiff): { settings: FunctionChange[]; access: FunctionCh
 
 /** Where code PermLang can't check is first imported or called, from its entry's `via`: ", in src/app.ts:3". */
 function uncheckedAt(capability: string, via: ViaPaths): string {
-  const where = Object.entries(via).find(([key]) => isUncheckedKey(key))?.[1][capability]?.[0];
+  const where = own(Object.entries(via).find(([key]) => isUncheckedKey(key))?.[1], capability)?.[0];
   return where === undefined ? "" : `, ${uncheckedCode(capability).kind === "import" ? "in" : "called in"} ${where}`;
 }
 
@@ -478,7 +481,7 @@ function byCapability(changes: readonly FunctionChange[]): Map<string, FunctionC
 function shortestPath(capability: string, functions: readonly FunctionChange[], via: ViaPaths) {
   let best: { fn: FunctionChange; path: string[] } | undefined;
   for (const fn of functions) {
-    const path = via[fn.key]?.[capability];
+    const path = own(own(via, fn.key), capability);
     if (path && (!best || path.length < best.path.length)) best = { fn, path };
   }
   return best;
@@ -550,4 +553,9 @@ function plain(value: string, max = CELL): string {
 
 function code(value: string): string {
   return `<code>${html(clip(value))}</code>`;
+}
+
+/** A record's own entry, never one every object has, such as `constructor`: a capability or function can be named that. */
+function own<T>(record: Readonly<Record<string, T>> | undefined, key: string): T | undefined {
+  return record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined;
 }

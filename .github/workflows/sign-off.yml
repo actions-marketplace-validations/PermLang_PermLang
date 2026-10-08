@@ -1,0 +1,46 @@
+name: Sign-off
+
+# Every commit in a pull request must be signed off by its author: a line
+#   Signed-off-by: Name <email>
+# at the end of its message, which `git commit -s` adds. It certifies the Developer
+# Certificate of Origin (https://developercertificate.org): that the author wrote the change,
+# or otherwise has the right to submit it under the project's license. See CONTRIBUTING.md.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  sign-off:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the pull request's commits, and the base they start from
+          persist-credentials: false
+      - name: Check every commit is signed off by its author
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=0
+          # Merge commits only join branches, so they're left out.
+          for commit in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            email=$(git show -s --format=%ae "$commit")
+            # Dependabot only changes version numbers, and signs off with another address.
+            if [ "$email" = "49699333+dependabot[bot]@users.noreply.github.com" ]; then continue; fi
+            if ! git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$commit" | grep -qiF "<$email>"; then
+              echo "::error::Commit $(git show -s --format='%h (%s)' "$commit") has no Signed-off-by line from its author, $(git show -s --format='%an' "$commit") <$email>."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "To sign off your last commit, run: git commit --amend --signoff --no-edit"
+            echo "For every commit in this pull request: git rebase --signoff $BASE"
+            echo "Then push again (git push --force-with-lease). CONTRIBUTING.md explains what signing off means."
+            exit 1
+          fi
+          echo "Every commit is signed off by its author."

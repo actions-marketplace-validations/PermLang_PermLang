@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Calls through a computed key, `obj[key](...)`. With a single literal key they
 // resolve like any other call. Otherwise:
 //   - on a sensitive object (fs, globalThis, an SDK), any capability function
@@ -7,7 +10,7 @@
 //   - behind an index signature (arrays, Record<string, Fn>), the functions
 //     can't be known, so the call is unverifiable.
 
-import { Node, SyntaxKind, type ElementAccessExpression, type ObjectLiteralExpression, type Symbol as MorphSymbol, type Type } from "ts-morph";
+import { Node, SyntaxKind, VariableDeclarationKind, type ElementAccessExpression, type ObjectLiteralExpression, type Symbol as MorphSymbol, type Type } from "ts-morph";
 import type { AdapterIndex } from "../adapters.js";
 import { unwrapExpression, type CallLike } from "./shared.js";
 import { functionCapabilities } from "./values.js";
@@ -40,7 +43,7 @@ export function classifyComputedCall(access: ElementAccessExpression, adapters: 
 
   // A key union of string literals narrows the members; any other string key allows all of them.
   const allowed = !cast && keyType.isUnion() && keyType.getUnionTypes().every((t) => t.isStringLiteral())
-    ? new Set(keyType.getUnionTypes().map((t) => String(t.getLiteralValue())))
+    ? new Set(keyType.getUnionTypes().map((t) => t.getLiteralValue() as string))
     : undefined;
 
   // `const x: Record<string, Fn> = { a: ..., b: ... }`: the type hides the members,
@@ -74,7 +77,7 @@ function constObjectLiteral(expression: Node): ObjectLiteralExpression | undefin
   if (!Node.isIdentifier(target)) return undefined;
   const declaration = target.getSymbol()?.getDeclarations()[0];
   if (!declaration || !Node.isVariableDeclaration(declaration)) return undefined;
-  if (declaration.getVariableStatement()?.getDeclarationKind() !== "const") return undefined;
+  if (declaration.getVariableStatement()?.getDeclarationKind() !== VariableDeclarationKind.Const) return undefined;
   const init = declaration.getInitializer();
   const literal = init && unwrapExpression(init);
   if (!literal || !Node.isObjectLiteralExpression(literal)) return undefined;

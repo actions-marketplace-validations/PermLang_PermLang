@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Project configuration: GitHub workflows, Actions, and package.json scripts.
 // These grant as much as code does (a token with write access, a secret, a hook that
 // runs on install), and AI agents edit them as readily as code. Each file is recorded

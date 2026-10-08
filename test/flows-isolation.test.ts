@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Flow rules with a file that can't be analyzed: its calls into packages with no adapter have no
 // function to belong to, and the file as a whole is unverifiable instead. The failure is
 // simulated, as in isolation.test.ts.

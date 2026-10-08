@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // A bug in PermLang must not look like a failed check: exit code 1 means permission errors and
 // nothing else. An internal error exits 2, with the error and where it happened, so it can be
 // reported (found in the code review, O2). Bugs are simulated by making one function throw.
@@ -10,8 +13,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runCli, runCliStreams } from "./run-cli.js";
 import { removeTemporary } from "./temporary.js";
 
-/** What each stand-in throws, when set. */
-const fail = vi.hoisted(() => ({ formatText: undefined as unknown, settingsEntries: undefined as unknown, formatDiffMarkdown: undefined as unknown }));
+/** What each stand-in throws, when set: an Error, or any other value, as a bug might. */
+const fail = vi.hoisted((): Record<"formatText" | "settingsEntries" | "formatDiffMarkdown", unknown> => ({ formatText: undefined, settingsEntries: undefined, formatDiffMarkdown: undefined }));
 
 vi.mock("../src/report.js", async (original) => {
   const real = await original<typeof import("../src/report.js")>();

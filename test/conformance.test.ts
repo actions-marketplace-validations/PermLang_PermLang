@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Conformance suite: every fixture declares its expected diagnostics inline.
 //
 //   someCall(); // expect: error PERM001 net(data-broker.io)

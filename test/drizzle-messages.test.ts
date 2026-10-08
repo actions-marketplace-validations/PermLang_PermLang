@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // What a diagnostic says about Drizzle SQL read back out of a schema object: the code that
 // reads it, shortened when it's long, as other diagnostics shorten code.
 

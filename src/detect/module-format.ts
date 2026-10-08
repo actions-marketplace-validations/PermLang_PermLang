@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // The module format TypeScript compiles a file to: whether its imports become require() calls,
 // and its exports a plain object that other files can write to.
 

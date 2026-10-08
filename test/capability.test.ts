@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 import { describe, expect, it } from "vitest";
 import { covers, formatCapability, parsePermList, type Capability } from "../src/capability.js";
 

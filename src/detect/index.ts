@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Finds every place in a file that directly uses a capability.
 //
 // Detection is by resolved declaration, not by name: a local function called

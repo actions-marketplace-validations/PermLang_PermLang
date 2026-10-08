@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: The PermLang Authors
+
 // Globals whose types come from somewhere other than lib.dom: Node's web globals (typed by
 // undici-types), `process` when Node's types are missing, and Vite's import.meta.env. Each
 // runs as its own project, since the shared fixtures have both lib.dom and @types/node.
